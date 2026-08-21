@@ -98,34 +98,21 @@ func (r *Runner) Running() bool {
 	}
 }
 
-// Stop performs a graceful stop: it waits up to timeout for the process to
-// exit on its own, then force-kills it. This mirrors the three-stage
-// shutdown (SIGTERM → poll → TerminateProcess) from the spec.
+// Stop terminates the process immediately. llama-server is a resident HTTP
+// server (this build has no /shutdown HTTP endpoint) so it never exits on its
+// own; waiting for a graceful timeout only delays the stop. On Windows
+// Process.Kill is TerminateProcess, which is instant.
 func (r *Runner) Stop(timeout time.Duration) error {
-	r.mu.Lock()
-	cmd := r.cmd
-	r.mu.Unlock()
-	if cmd == nil || cmd.Process == nil {
-		return errors.New("not running")
-	}
-	// Stage 1: signal graceful shutdown via the process (best effort).
-	// llama-server also honours a POST /shutdown, handled by callers.
-	// Stage 2: wait up to timeout.
-	select {
-	case <-r.exited:
-		return nil
-	case <-time.After(timeout):
-	}
-	// Stage 3: force kill.
+	_ = timeout // 保留签名兼容；llama-server 常驻，无需等待优雅退出
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if cmd.Process != nil {
-		err := cmd.Process.Kill()
-		// Wait for the watcher goroutine to reap the process.
-		<-r.exited
-		return err
+	if r.cmd == nil || r.cmd.Process == nil {
+		return errors.New("not running")
 	}
-	return nil
+	err := r.cmd.Process.Kill()
+	// Wait for the watcher goroutine to reap the process.
+	<-r.exited
+	return err
 }
 
 // Kill force-terminates the process immediately.

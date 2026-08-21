@@ -1261,7 +1261,7 @@ func (a *App) handleStop(w http.ResponseWriter, r *http.Request) {
 	_ = a.sessions.Update(ar.session)
 	a.hub.PublishLog(id, "INFO", "正在停止实例…")
 	go func() {
-		if err := ar.runner.Stop(15 * time.Second); err != nil {
+		if err := ar.runner.Stop(8 * time.Second); err != nil {
 			a.hub.PublishLog(id, "ERROR", "停止失败: "+err.Error())
 			return
 		}

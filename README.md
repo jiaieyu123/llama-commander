@@ -61,6 +61,9 @@ Llama Commander 是一个基于 Web 的图形化管理工具，为 [llama.cpp](h
 ![模型库](docs/screenshots/library.png)
 *模型库：扫描导入、智能捆绑（mmproj / MTP / LoRA / 分片）*
 
+![MTP 投机解码](docs/screenshots/mtp.png)
+*MTP 投机解码：加载 Qwen3-MTP 模型自动启用，2~3 倍解码加速*
+
 ![批量测试与参数扫描](docs/screenshots/test.png)
 *批量测试与参数扫描：穷举寻优 / 智能寻优*
 

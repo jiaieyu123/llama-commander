@@ -53,7 +53,23 @@ Llama Commander 是一个基于 Web 的图形化管理工具，为 [llama.cpp](h
 
 ---
 
-## 🚀 快速开始
+## � 界面预览
+
+![主界面](docs/screenshots/main.png)
+*主界面：模型选择、参数配置、实时命令预览、运行实例与日志控制台*
+
+![模型库](docs/screenshots/library.png)
+*模型库：扫描导入、智能捆绑（mmproj / MTP / LoRA / 分片）*
+
+![批量测试与参数扫描](docs/screenshots/test.png)
+*批量测试与参数扫描：穷举寻优 / 智能寻优*
+
+![使用洞察](docs/screenshots/insights.png)
+*使用洞察：Token 统计、模型热度、吞吐仪表盘*
+
+---
+
+## �🚀 快速开始
 
 ### 环境要求
 | 组件 | 说明 |

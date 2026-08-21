@@ -1,127 +1,163 @@
 # 🚀 Llama Commander
 
-llama.cpp 智能启动管理器 — 基于 Web 的图形化管理工具，让你像使用软件一样管理 AI 模型。
+> llama.cpp 智能启动管理器 —— 像使用软件一样管理你的 AI 模型
 
-> 当前状态：**v0.1 项目骨架**（可编译、可运行、核心模块已定义）
-> 完整方案见方案文档（v4.0），共 11 个 Phase。
+Llama Commander 是一个基于 Web 的图形化管理工具，为 [llama.cpp](https://github.com/ggml-org/llama.cpp) 提供完整的模型管理、参数配置、多实例控制与性能监控能力。单二进制、开箱即用，无需任何前端/后端开发环境。
 
-## ✨ 核心能力（规划全景）
+![GitHub release](https://img.shields.io/badge/release-v0.1-blue)
+![Go](https://img.shields.io/badge/Go-1.24+-00ADD8)
+![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)
+![License](https://img.shields.io/badge/License-MIT-green)
 
-| 模块 | 状态 |
-|------|------|
-| 模型库管理（Bundle：主模型 + mmproj + 草稿 + LoRA） | 🟢 手动添加/扫描/智能捆绑/分片 + 内置 📂 文件浏览器 |
-| 智能参数配置（~100 项 2026 参数矩阵 + 三级继承链） | 🟢 参数矩阵 + 继承链 + 实时命令预览 |
-| 自动配置引擎（硬件检测 / VRAM 估算 / 一键优化） | 🟢 一键优化已接入后端真实计算 |
-| 服务器控制（启动/停止/重启/多实例/Job Object） | 🟢 多实例并发 + 重启 + 停止全部 + 防孤儿 |
-| 日志监控（WebSocket 实时流 + 颜色/过滤/搜索） | 🟢 实时流 + 会话级过滤 + 会话标签 + 崩溃检测 |
-| 性能监控（/metrics + ECharts） | 🟢 真实 /metrics 轮询 → WS → 实时图表 |
-| 预设方案（6 内置 + 自定义） | 🟢 内置预设 |
-| 缓存管理（~/.cache/llama.cpp） | 🟢 浏览/删除/导入模型库 + 官方缓存布局 |
-| 模型下载（HF 仓库浏览/量化选择/断点续传/自动入库） | 🟢 下载进度条 + 镜像 HF_ENDPOINT |
-| API 调试（Chat/Completions/Embeddings + 流式 + 统计 + 历史） | 🟢 通用代理 + 打字机效果 + 重放 |
-| 使用洞察（Token 统计/模型热度/吞吐基准/成功率） | 🟢 ECharts 仪表盘 + 指标持久化 |
-| MCP 管理（注册/删除 + 启动参数绑定） | 🟢 前端管理弹窗 + --mcp 参数 |
-| 全局设置（API Key 加密/二进制/HF 镜像/日志保留） | 🟢 AES-256-GCM 加密存储 |
-| Docker 源 / 多版本二进制管理 | ⬜ 未开始 |
+---
+
+## ✨ 功能特性
+
+### 📦 模型库管理
+- 📁 递归扫描 + 智能捆绑：自动识别并绑定 **mmproj 视觉编码器**、**MTP 草稿模型**、**LoRA 适配器**、**分片模型**
+- 📂 内置文件浏览器，浏览目录 / 驱动器直接导入
+- 🏷️ 自动打标签（架构 / 视觉 / MTP），展示模型元数据（上下文长度、参数量、量化类型等）
+
+### ⚡ 智能参数配置
+- 🧮 **~100 项 2026 参数矩阵** + 三级继承链（全局默认 → 模型默认 → 本次启动）
+- 📝 实时命令预览，所见即所得
+- 🎯 **一键优化**：基于真实硬件 VRAM 估算自动推荐参数
+- 🔍 配置健康审计：KV 缓存量化、Flash Attention 等常见坑自动告警
+- 🧩 **MTP 投机解码**：加载 Qwen3-MTP / Qwopus-MTP 等模型时自动显示 MTP 参数组，启用 `--spec-type draft-mtp` 获得 **2~3 倍解码加速**
+- 📚 上下文预设随模型最大上下文动态生成
+
+### 🖥 多实例控制
+- ▶️ 启动 / ⏹ 停止 / 🔄 重启 / 🛑 全部停止
+- 👥 多实例并发运行（Windows Job Object 防孤儿进程）
+- 💥 崩溃自动检测 + 实例状态实时刷新
+
+### 📊 监控与洞察
+- 📋 **实时日志控制台**：WebSocket 流式输出、会话级过滤、暂停 / 清空 / 导出、崩溃检测
+- 📈 **性能监控**：真实 `/metrics` 轮询（兼容旧版 JSON 与新版 Prometheus 文本）→ ECharts 实时吞吐 / Token / KV 图表
+- 📉 **使用洞察**：Token 统计、模型热度、吞吐基准、成功率仪表盘
+
+### 🧪 批量测试与参数扫描
+- 🖥 **批量测试**：多模型并行跑真实推理，汇总 TPS / 加载时长
+- 🔀 **穷举扫描**：多参数笛卡尔积寻优（带上限保护）
+- 🔍 **智能寻优**：坐标下降逐参数优化，几十次测试即可收敛
+- 💾 **最优配置保存 / 一键套用**：下次启动同模型直接填参数
+
+### 🌐 下载与缓存
+- ⬇️ **Hugging Face 模型下载**：仓库浏览、量化选择、断点续传、自动入库、HF 镜像支持
+- 🗂 缓存管理器：浏览 / 删除 / 导入 / 导出
+
+### 🔌 扩展能力
+- 🛠 **API 调试**：OpenAI 兼容代理（Chat / Completions / Embeddings）、SSE 流式、统计、历史重放
+- 🧩 **MCP 管理**：注册 / 删除 MCP 服务器并绑定启动参数
+- ⚙️ **全局设置**：llama-server 路径、HF 镜像、日志保留、**API Key AES-256-GCM 加密存储**（明文按需回显 / 一键复制 / 自动填入）
+
+---
 
 ## 🚀 快速开始
 
-```bash
-# 1. 启动服务（默认 http://127.0.0.1:8080）
-go run cmd/server/main.go
+### 环境要求
+| 组件 | 说明 |
+|------|------|
+| **Windows / Linux / macOS** | 已提供跨平台构建脚本 |
+| **[llama-server](https://github.com/ggml-org/llama.cpp/releases)** | 唯一外部依赖，在 ⚙️ 设置中填写路径 |
+| **NVIDIA GPU**（可选） | 使用 CUDA 版 llama-server 时可加速；纯 CPU 也可运行 |
+| **Go 1.24+**（仅编译需要） | 运行时不需要任何开发环境 |
 
-# 2. 单独测试 GGUF 解析
-go run cmd/server/main.go parse H:\models\my-model.gguf
-
-# 3. 编译为单二进制
-go build -o llama-commander.exe cmd/server/main.go
+### 一键启动（Windows）
+```
+1. 双击 start.cmd（或运行 scripts\start.ps1）
+2. 浏览器自动打开 http://127.0.0.1:8114
+3. ⚙️ 设置 → 填入 llama-server 路径
+4. 扫描 / 导入模型 → 选择模型 → ▶ 启动
 ```
 
-浏览器访问 `http://127.0.0.1:8080`。
+### 从源码编译
+```bash
+# 启动开发服务（默认 127.0.0.1:8080）
+go run cmd/server/main.go
+
+# 编译单二进制（前端已内嵌，约 10MB）
+go build -o llama-commander.exe ./cmd/server
+
+# 跨平台打包（Win / Linux / macOS → dist/）
+powershell -File scripts/build-all.ps1
+
+# 运行测试
+go test ./...
+```
+
+### 常用命令
+| 命令 | 用途 |
+|------|------|
+| `go run cmd/server/main.go` | 启动管理器 |
+| `go run cmd/server/main.go parse <模型.gguf>` | 单独测试 GGUF 解析 |
+| `go build -o llama-commander.exe ./cmd/server` | 编译 EXE |
+| `powershell -File scripts/sync-web.ps1` | 前端镜像同步（改 `internal/webui/dist/` 后运行） |
+| `powershell -File scripts/build-all.ps1` | 跨平台打包 |
+| `powershell -File scripts/start.ps1 -Port 8114 -NoBrowser` | 自定义端口启动 |
+
+---
 
 ## 🏗 目录结构
 
 ```
-├── cmd/server/main.go          # 主入口（HTTP + WS + 子进程管理）
+├── cmd/server/main.go          # 主入口（HTTP + WS + 子进程管理 + 测试/扫描引擎）
 ├── internal/
-│   ├── gguf/                   # GGUF 头解析（v3，含单元测试）
-│   ├── llama/                  # 进程管理（Windows Job Object）+ 健康检测
+│   ├── gguf/                   # GGUF v3 头解析（含单元测试）
+│   ├── llama/                  # 进程管理（Windows Job Object）+ 健康检测 + 指标解析
 │   ├── config/                 # 参数矩阵 / 三级继承链 / 自动配置 / 健康审计
 │   ├── bundle/                 # 模型组合包 CRUD / 缓存管理 / 分片检测
 │   ├── session/                # 多实例会话管理
+│   ├── secure/                 # AES-256-GCM 加密存储
+│   ├── downloader/             # Hugging Face 下载（断点续传）
+│   ├── fsbrowse/               # 内置文件浏览器
 │   ├── mcp/                    # MCP 服务器管理
-│   └── webui/                  # 内嵌前端（go:embed）
+│   └── webui/                  # 内嵌前端（go:embed，ECharts 5.5）
 ├── web/dist/                   # 前端镜像副本（勿直接编辑，用脚本同步）
-├── data/                       # 运行时 JSON（bundles/presets/config/mcp/sessions）
+├── data/                       # 运行时数据（config/bundles/sessions/mcp）
 ├── logs/                       # 会话日志（按日期分目录）
-├── binaries/                   # 多版本 llama-server
-└── scripts/sync-web.ps1        # 前端镜像同步脚本
+├── binaries/                   # 多版本 llama-server 目录
+├── scripts/                    # 启动 / 构建 / 同步脚本
+├── start.cmd                   # Windows 一键启动
+└── scratch/fakeserver/         # 模拟 llama-server 的端到端测试工具
 ```
 
-## 🔧 常用命令
+---
 
-| 命令 | 用途 |
-|------|------|
-| `go run cmd/server/main.go` | 启动管理器 |
-| `go run cmd/server/main.go parse <模型>` | 测试 GGUF 解析 |
-| `go build -o llama-commander.exe cmd/server/main.go` | 编译 EXE |
-| `go test ./...` | 运行全部测试 |
-| `powershell -File scripts/sync-web.ps1` | 同步前端镜像 |
-| `powershell -File scripts/build-all.ps1` | 跨平台打包（Win/Linux/macOS → dist/） |
-
-## 🌐 HTTP API 一览
+## 🌐 HTTP API（节选）
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/health` | 服务健康/版本 |
+| GET | `/api/health` | 服务健康 / 版本 |
 | GET | `/api/system` | 硬件信息 |
-| GET/POST | `/api/bundles` | 模型库列表 / 新增 |
-| PUT/DELETE | `/api/bundles/{id}` | 更新 / 删除 |
-| POST | `/api/parse` | 解析 GGUF |
-| GET | `/api/cache` | 缓存条目 |
-| POST | `/api/cache/delete` | 删除缓存条目 |
-| POST | `/api/cache/import` | 本地 GGUF 注册到缓存 |
-| POST | `/api/cache/export` | 导出缓存条目 |
-| POST | `/api/hf/list` | 列出 HF 仓库 GGUF 文件 |
-| POST | `/api/hf/download` | 异步断点续传下载 + 自动入库 |
-| POST | `/api/debug/proxy` | 向运行实例转发 OpenAI 兼容请求（含 SSE 流式） |
-| GET | `/api/sessions` | 会话列表 |
-| GET | `/api/mcp` | MCP 服务器列表 |
-| POST | `/api/mcp` | 注册 MCP 服务器 |
-| DELETE | `/api/mcp/{id}` | 删除 MCP 服务器 |
-| GET | `/api/fs/list` | 目录浏览（驱动器/子目录/.gguf 文件） |
-| GET | `/api/config` | 读取全局设置（密钥仅返回布尔） |
-| PUT | `/api/config` | 保存设置（API Key 加密存储） |
-| GET | `/api/insights` | 使用洞察聚合（token/模型/日期/成功率） |
+| GET | `/api/bundles` | 模型库列表 |
+| POST | `/api/bundles/scan` | 扫描目录（自动捆绑 mmproj/MTP/LoRA） |
+| POST | `/api/recommend` | 一键优化（VRAM 估算） |
+| GET/POST | `/api/test/sweep` | 参数扫描 / 智能寻优 |
+| GET | `/api/sessions` | 实例列表 |
 | POST | `/api/sessions/start` | 启动模型 |
-| POST | `/api/sessions/{id}/stop` | 停止模型 |
-| POST | `/api/sessions/{id}/restart` | 重启模型 |
-| POST | `/api/preview` | 命令预览 |
+| POST | `/api/sessions/{id}/stop` | 停止实例 |
+| POST | `/api/debug/proxy` | 向实例转发 OpenAI 兼容请求（SSE 流式） |
+| GET/POST | `/api/hf/list` `/api/hf/download` | HF 仓库浏览 / 下载 |
+| GET | `/api/config` | 读取全局设置（密钥仅返回布尔） |
+| GET | `/api/config/key` | 按需返回解密后的 API Key |
+| PUT | `/api/config` | 保存设置（API Key 加密存储） |
 | GET | `/api/ws` | WebSocket 日志流 + 指标推送 |
 
-## 🧪 开发测试工具
+---
 
-`scratch/fakeserver/` 是一个模拟 llama-server（监听端口并响应 `/health` 与
-`/metrics`），用于端到端测试启动/停止/重启与指标面板，无需真实模型：
+## 🛠 技术栈
 
-```bash
-go build -o scratch/fakeserver.exe ./scratch/fakeserver
-./llama-commander.exe -binary "h:\llama Qdgl\scratch\fakeserver.exe"
-```
+- **后端**：Go 1.24+（`net/http` + `gorilla/websocket` + `golang.org/x/sys`）
+- **前端**：原生 HTML / CSS / JavaScript + ECharts 5.5（CDN，`go:embed` 打包为单文件）
+- **安全**：API Key AES-256-GCM 加密存储（`data/.secret` 密钥文件，不落明文）
 
-## 🗺 开发路线图
+---
 
-| Phase | 版本 | 内容 |
-|-------|------|------|
-| 0 | 架构验证 | ✅ 本项目骨架 |
-| 1 | v0.1 | REST API + 前端框架 + 手动添加 Bundle |
-| 2 | v0.2 | 子进程 + Job Object + 日志流 |
-| 3 | v0.3 | 完整参数矩阵 + 三级继承 + VRAM 估算 |
-| 4 | v0.4 | 模型库 + GGUF 入库 + 分片 |
-| 5 | v0.5 | 预设系统 + 命令行生成器 |
-| 6 | v0.6 | 多实例 + Router 监控 + 崩溃恢复 |
-| 7 | v0.7 | /metrics 面板 + ECharts |
-| 8 | v0.8 | 缓存管理器 + 多源下载 |
-| 9 | v0.9 | 自动配置引擎 + 健康审计 |
-| 10 | v0.95 | MCP + 内置 WebUI |
-| 11 | v1.0 | 洞察面板 + API 调试 + 跨平台 |
+## 📄 License
+
+[MIT](LICENSE) © 2026 [Jiaieyu123](https://github.com/jiaieyu123)
+
+---
+
+*Built with ❤️ for the llama.cpp community.*

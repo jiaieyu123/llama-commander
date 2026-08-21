@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>🚀 Llama Commander</title>
+  <link rel="stylesheet" href="css/style.css">
+  <!-- ECharts (轻量版 CDN；离线时图表功能降级) -->
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">🚀 Llama Commander <span class="badge-ver">v0.1-skeleton</span></div>
+    <div class="topbar-right">
+      <span class="inst-stat">实例: <b id="stat-running">0</b> 运行 / <b id="stat-stopped">0</b> 停止</span>
+      <button class="btn" id="btn-debug">🛠 API</button>
+      <button class="btn" id="btn-insights">📊 洞察</button>
+      <button class="btn" id="btn-mcp">🧩 MCP</button>
+      <button class="btn" id="btn-test" title="批量测试模型 / 参数扫描">🧪 测试</button>
+      <button class="btn" id="btn-library">📦 模型库</button>
+      <button class="btn" id="btn-settings">⚙️ 设置</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- 实例卡片区域 -->
+    <section class="panel" id="instances-panel">
+      <h2 class="panel-title">运行实例</h2>
+      <div id="instances" class="instances-grid">
+        <div class="empty-hint">暂无运行实例。请在下方选择模型并点击 ▶ 启动。</div>
+      </div>
+    </section>
+
+    <!-- 配置面板 -->
+    <section class="panel" id="config-panel">
+      <h2 class="panel-title">配置</h2>
+
+      <div class="cfg-row">
+        <label>模型</label>
+        <select id="model-select"><option value="">— 请选择模型 —</option></select>
+        <button class="btn small" id="btn-refresh-models" title="刷新模型库">🔄</button>
+        <button class="btn small accent" id="btn-optimize" title="一键优化">✨ 一键优化</button>
+        <button class="btn small" id="btn-params-help" title="查看全部参数说明与调整方法">📖 参数说明</button>
+      </div>
+      <div class="cfg-meta" id="bundle-meta">📷 视觉: — | ⚡ 草稿: 未启用 | 🏷️ 标签: —</div>
+      <div class="cfg-row" id="cfg-row-configs" hidden>
+        <label>🧪 测试配置</label>
+        <select id="test-config-select" title="选择该模型已保存的最优测试配置，选中即填入启动参数"></select>
+        <button class="btn small" id="btn-apply-config" title="把所选测试配置填入启动参数">⚡ 套用</button>
+      </div>
+
+      <div class="cfg-grid">
+        <!-- ⚡ 性能 -->
+        <fieldset class="cfg-group">
+          <legend>⚡ 性能</legend>
+          <div class="field"><label>GPU 层数</label><span class="num-wrap"><input type="number" id="p-n_gpu_layers" value="0" min="-1" step="1"><select class="preset" data-target="p-n_gpu_layers"><option value="">▾ 预设</option><option value="-1">-1 自动</option><option value="0">0 纯CPU</option><option value="8">8 小显存</option><option value="16">16 中显存</option><option value="24">24</option><option value="32">32 大显存</option><option value="40">40 全部</option></select></span><span class="src" data-key="n_gpu_layers">🌐</span></div>
+          <div class="field"><label>上下文</label><span class="num-wrap"><input type="number" id="p-ctx_size" value="4096" step="256"><select class="preset" data-target="p-ctx_size"><option value="">▾ 预设</option><option value="2048">2048 短对话</option><option value="4096">4096 标准</option><option value="8192">8192 长对话</option><option value="16384">16384 长文档</option><option value="32768">32768 超长</option><option value="65536">65536 极大</option><option value="131072">131072 原生</option></select></span><span class="src" data-key="ctx_size">🌐</span></div>
+          <div class="field"><label>线程数</label><span class="num-wrap"><input type="number" id="p-threads" value="0" min="1"><select class="preset" data-target="p-threads"><option value="">▾ 预设</option><option value="0">0 自动</option><option value="4">4</option><option value="8">8</option><option value="12">12</option><option value="16">16</option><option value="24">24</option><option value="32">32</option></select></span><span class="src" data-key="threads">🌐</span></div>
+          <div class="field"><label>批大小</label><span class="num-wrap"><input type="number" id="p-batch_size" value="2048"><select class="preset" data-target="p-batch_size"><option value="">▾ 预设</option><option value="512">512</option><option value="1024">1024</option><option value="2048">2048 默认</option><option value="4096">4096</option><option value="8192">8192 超大</option></select></span><span class="src" data-key="batch_size">🌐</span></div>
+          <div class="field"><label>Flash Attn</label>
+            <select id="p-flash_attn"><option value="on">on（✅推荐，省显存加速）</option><option value="off">off（关闭，兼容最好）</option><option value="auto">auto（自动）</option></select><span class="src" data-key="flash_attn">🌐</span>
+          </div>
+          <div class="field"><label>K 缓存</label>
+            <select id="p-cache_type_k"><option value="f32">f32（32位浮点，精度最高）</option><option value="f16">f16（✅推荐，均衡）</option><option value="bf16">bf16（脑浮点，精度损失小）</option><option value="q8_0">q8_0（8位量化，省显存）</option><option value="q4_0">q4_0（4位量化，更省）</option><option value="q4_1">q4_1（4位量化+偏移）</option><option value="iq4_nl">iq4_nl（智能4位，推荐）</option><option value="q5_0">q5_0（5位量化）</option><option value="q5_1">q5_1（5位量化+偏移）</option></select>
+          </div>
+          <div class="field"><label>V 缓存</label>
+            <select id="p-cache_type_v"><option value="f32">f32（32位浮点，精度最高）</option><option value="f16">f16（✅推荐，均衡）</option><option value="bf16">bf16（脑浮点，精度损失小）</option><option value="q8_0">q8_0（8位量化，省显存）</option><option value="q4_0">q4_0（4位量化，更省）</option><option value="q4_1">q4_1（4位量化+偏移）</option><option value="iq4_nl">iq4_nl（智能4位，推荐）</option><option value="q5_0">q5_0（5位量化）</option><option value="q5_1">q5_1（5位量化+偏移）</option></select>
+          </div>
+          <div class="field"><label>RoPE 缩放</label>
+            <select id="p-rope_scaling"><option value="">自动（✅推荐，跟随模型）</option><option value="none">none（不缩放）</option><option value="linear">linear（线性外推）</option><option value="yarn">yarn（YaRN，长上下文更佳）</option></select>
+          </div>
+          <div class="field"><label>RoPE 缩放因子</label><input type="number" id="p-rope_scale" value="" placeholder="自动" min="0" step="0.1"></div>
+          <div class="field"><label>多模态 mmproj</label><input type="text" id="p-mmproj" placeholder="mmproj.gguf 路径（可选）"></div>
+          <div class="field"><label>并行槽位</label><input type="number" id="p-parallel" value="" placeholder="-1（自动）" min="-1"></div>
+          <div class="field"><label class="chk"><input type="checkbox" id="p-embedding"> 嵌入模式</label></div>
+          <div class="field"><label class="chk"><input type="checkbox" id="p-rerank"> 重排模式</label></div>
+          <div class="field"><label class="chk"><input type="checkbox" id="p-cpu_moe"> MoE 专家驻留 CPU</label></div>
+        </fieldset>
+
+        <!-- 🧩 MTP 投机解码（仅 MTP 模型显示）-->
+        <fieldset class="cfg-group" id="cfg-group-mtp" hidden>
+          <legend>🧩 MTP 投机解码</legend>
+          <div class="field"><label class="chk"><input type="checkbox" id="p-spec_type"> 🚀 启用 MTP 多 Token 预测（draft-mtp，用模型自带 MTP 头投机加速）</label></div>
+          <div class="field"><label>草稿 GPU 层数</label><span class="num-wrap"><input type="number" id="p-n_gpu_layers_draft" value="" placeholder="0（全CPU）" min="0"><select class="preset" data-target="p-n_gpu_layers_draft"><option value="">▾ 预设</option><option value="0">0 纯CPU</option><option value="16">16 中显存</option><option value="33">33 全量</option><option value="40">40 全部</option></select></span></div>
+          <div class="field"><label>草稿线程数</label><span class="num-wrap"><input type="number" id="p-spec_draft_threads" value="" placeholder="0（自动）" min="0"><select class="preset" data-target="p-spec_draft_threads"><option value="">▾ 预设</option><option value="0">0 自动</option><option value="4">4</option><option value="8">8</option><option value="16">16</option><option value="32">32</option></select></span></div>
+          <div class="field"><label>草稿最大 token</label><span class="num-wrap"><input type="number" id="p-spec_draft_n_max" value="" placeholder="3（默认）" min="1"><select class="preset" data-target="p-spec_draft_n_max"><option value="">▾ 预设</option><option value="1">1</option><option value="2">2</option><option value="3">3 默认</option><option value="4">4</option><option value="5">5</option></select></span></div>
+          <div class="field"><label>草稿最小 token</label><span class="num-wrap"><input type="number" id="p-spec_draft_n_min" value="" placeholder="0（默认）" min="0"><select class="preset" data-target="p-spec_draft_n_min"><option value="">▾ 预设</option><option value="0">0 默认</option><option value="1">1</option><option value="2">2</option><option value="3">3</option></select></span></div>
+          <div class="field"><label>分裂概率</label><span class="num-wrap"><input type="number" id="p-spec_draft_p_split" value="" placeholder="0.10（默认）" min="0" max="1" step="0.01"><select class="preset" data-target="p-spec_draft_p_split"><option value="">▾ 预设</option><option value="0.05">0.05 保守</option><option value="0.10">0.10 默认</option><option value="0.15">0.15</option><option value="0.20">0.20 激进</option><option value="0.30">0.30</option></select></span></div>
+          <div class="field"><label>最小接受概率</label><span class="num-wrap"><input type="number" id="p-spec_draft_p_min" value="" placeholder="0.00（默认）" min="0" max="1" step="0.01"><select class="preset" data-target="p-spec_draft_p_min"><option value="">▾ 预设</option><option value="0.00">0.00 默认</option><option value="0.05">0.05</option><option value="0.10">0.10</option><option value="0.15">0.15</option></select></span></div>
+        </fieldset>
+
+        <!-- 🎨 采样 -->
+        <fieldset class="cfg-group">
+          <legend>🎨 采样</legend>
+          <div class="field"><label>温度</label><input type="number" id="p-temperature" value="0.8" min="0" max="2" step="0.05"></div>
+          <div class="field"><label>Top-P</label><input type="number" id="p-top_p" value="0.95" min="0" max="1" step="0.01"></div>
+          <div class="field"><label>Top-K</label><input type="number" id="p-top_k" value="40" min="0"></div>
+          <div class="field"><label>Min-P</label><input type="number" id="p-min_p" value="0.05" min="0" max="1" step="0.01"></div>
+          <div class="field"><label>采样器链</label><input type="text" id="p-samplers" value="penalties;dry;top_k;top_p;min_p;temperature"></div>
+          <div class="field"><label>种子</label><input type="number" id="p-seed" value="-1"></div>
+          <div class="field"><label>重复惩罚</label><input type="number" id="p-repeat_penalty" value="" placeholder="1.0（禁用）" min="0" step="0.05"></div>
+          <div class="field"><label>存在惩罚</label><input type="number" id="p-presence_penalty" value="" placeholder="0（禁用）" step="0.1"></div>
+          <div class="field"><label>频率惩罚</label><input type="number" id="p-frequency_penalty" value="" placeholder="0（禁用）" step="0.1"></div>
+        </fieldset>
+
+        <!-- 🧠 内存 -->
+        <fieldset class="cfg-group">
+          <legend>🧠 内存</legend>
+          <div class="field"><label>加载模式</label>
+            <select id="p-load_mode"><option value="mmap">mmap（✅推荐，默认快）</option><option value="none">none（一次性读入）</option><option value="mlock">mlock（锁定到RAM防换页）</option><option value="mmap+mlock">mmap+mlock（映射+锁定）</option><option value="dio">dio（直接IO）</option></select>
+          </div>
+          <div class="field"><label>NUMA</label>
+            <select id="p-numa"><option value="">自动（✅推荐，不设置）</option><option value="distribute">distribute（层均匀分布）</option><option value="isolate">isolate（按节点隔离）</option><option value="numactl">numactl（系统numactl）</option></select>
+          </div>
+          <div class="field"><label>提示缓存内存(MiB)</label><span class="num-wrap"><input type="number" id="p-cache_ram" value="" placeholder="8192（默认）" min="-1"><select class="preset" data-target="p-cache_ram"><option value="">▾ 预设</option><option value="0">0 禁用</option><option value="2048">2048 紧张</option><option value="4096">4096</option><option value="8192">8192 默认</option><option value="16384">16384 大</option><option value="32768">32768 超大</option></select></span></div>
+          <div class="field"><label>上下文检查点</label><span class="num-wrap"><input type="number" id="p-ctx_checkpoints" value="" placeholder="32（默认）" min="0"><select class="preset" data-target="p-ctx_checkpoints"><option value="">▾ 预设</option><option value="8">8</option><option value="16">16</option><option value="32">32 默认</option><option value="64">64</option></select></span></div>
+          <div class="field"><label>检查点最小间隔</label><span class="num-wrap"><input type="number" id="p-checkpoint_min_step" value="" placeholder="8192（默认）" min="0"><select class="preset" data-target="p-checkpoint_min_step"><option value="">▾ 预设</option><option value="2048">2048 更密</option><option value="4096">4096</option><option value="8192">8192 默认</option><option value="16384">16384 更疏</option></select></span></div>
+          <div class="field"><label class="chk"><input type="checkbox" id="p-kv_unified"> 统一 KV 缓冲</label></div>
+        </fieldset>
+
+        <!-- 🌐 网络 -->
+        <fieldset class="cfg-group">
+          <legend>🌐 网络</legend>
+          <div class="field"><label>主机</label><input type="text" id="p-host" value="127.0.0.1"></div>
+          <div class="field"><label>端口</label><input type="number" id="p-port" value="8080" min="1" max="65535"></div>
+          <div class="field"><label>API Key（仅本次）</label><input type="password" id="p-api_key" placeholder="可选"><button class="btn small" id="p-key-gen" title="自动生成随机 API Key">🎲</button><button class="btn small" id="p-key-copy" title="复制到剪贴板">📋</button><button class="btn small" id="p-key-toggle" title="显示/隐藏">👁</button></div>
+          <div class="field"><label>HTTP 线程数</label><input type="number" id="p-threads_http" value="" placeholder="-1（自动）" min="-1"></div>
+          <div class="field"><label class="chk"><input type="checkbox" id="p-metrics"> Prometheus 指标</label></div>
+          <div class="field"><label class="chk"><input type="checkbox" id="p-props"> 运行时改参数</label></div>
+        </fieldset>
+      </div>
+
+      <!-- 配置健康审计 -->
+      <div class="audit" id="audit-box">
+        <div class="empty-hint">🔍 选择模型后自动运行配置健康审计。</div>
+      </div>
+
+      <!-- 预设条 -->
+      <div class="preset-bar">
+        <span>预设:</span>
+        <button class="chip" data-preset="default">🏠 默认</button>
+        <button class="chip" data-preset="speed">⚡ 性能</button>
+        <button class="chip" data-preset="lowvram">💾 省显存</button>
+        <button class="chip" data-preset="context">📜 长文本</button>
+        <button class="chip" data-preset="code">💻 代码</button>
+        <button class="chip" data-preset="creative">✍️ 创意</button>
+        <button class="btn small" id="btn-save-preset">💾 存当前</button>
+      </div>
+
+      <!-- 操作按钮 -->
+      <div class="action-bar">
+        <button class="btn primary" id="btn-start">▶ 启动</button>
+        <button class="btn" id="btn-stop">⏹ 停止</button>
+        <button class="btn" id="btn-restart">🔄 重启</button>
+        <button class="btn" id="btn-export">📋 导出脚本</button>
+      </div>
+
+      <!-- 命令预览 -->
+      <pre class="cmd-preview" id="cmd-preview">选择模型并调整参数后，这里会实时预览命令行。</pre>
+    </section>
+
+    <!-- 性能监控 -->
+    <section class="panel" id="metrics-panel">
+      <h2 class="panel-title">📊 性能监控</h2>
+      <div class="metric-stats">
+        <div class="metric"><span class="m-label">吞吐</span><span class="m-value" id="m-tps">--</span><span class="m-unit">tok/s</span></div>
+        <div class="metric"><span class="m-label">已生成</span><span class="m-value" id="m-tokens">0</span></div>
+        <div class="metric"><span class="m-label">KV 占用</span><span class="m-value" id="m-kv">--</span></div>
+      </div>
+      <div id="tps-chart" class="chart" style="height:180px"></div>
+    </section>
+
+    <!-- 日志控制台 -->
+    <section class="panel" id="log-panel">
+      <h2 class="panel-title">📋 日志控制台
+        <span class="log-tools">
+          <select id="log-level"><option value="all">全部</option><option>INFO</option><option>WARN</option><option>ERROR</option><option>DEBUG</option></select>
+          <select id="log-session"><option value="">全部实例</option></select>
+          <input type="text" id="log-search" placeholder="🔍 搜索…">
+          <button class="btn small" id="btn-log-pause">⏸ 暂停</button>
+          <button class="btn small" id="btn-log-clear">🗑 清空</button>
+          <button class="btn small" id="btn-log-export">📥 导出</button>
+        </span>
+      </h2>
+      <div id="log-console" class="log-console"></div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    模型库: <b id="foot-models">0</b> 个模型 | 预设: 6 个方案 | 今日会话: <b id="foot-sessions">0</b> 次
+  </footer>
+
+  <!-- 模型库抽屉 -->
+  <div class="drawer" id="library-drawer">
+    <div class="drawer-head">
+      <h2>📦 模型库</h2>
+      <div class="drawer-tools">
+        <button class="btn small" id="btn-scan-dir">📁 扫描</button>
+        <button class="btn small" id="btn-hf-download">⬇️ 下载</button>
+        <button class="btn small" id="btn-cache">🗂 缓存</button>
+        <button class="btn small" id="btn-drawer-close">✕</button>
+      </div>
+    </div>
+    <div class="drawer-body" id="library-list"></div>
+  </div>
+
+  <!-- 扫描文件夹弹窗 -->
+  <div class="modal-overlay" id="scan-modal" hidden>
+    <div class="modal modal-wide">
+      <div class="modal-head">
+        <h3>📁 扫描文件夹</h3>
+        <button class="btn small" data-close>✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="field"><label>目录</label>
+          <input type="text" id="scan-dir" placeholder="H:\models">
+          <button class="btn small" id="scan-browse" title="浏览选择目录">📂 浏览</button>
+          <button class="btn" id="scan-go">🔍 扫描</button>
+        </div>
+        <div id="scan-result">
+          <div class="empty-hint">输入目录后点击"扫描"，将递归发现所有 GGUF 模型并自动捆绑配套文件。</div>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <span class="modal-info" id="scan-count">已选 0 项</span>
+        <button class="btn" data-close>取消</button>
+        <button class="btn primary" id="scan-import" disabled>📥 批量导入选中</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- HF 下载弹窗 -->
+  <div class="modal-overlay" id="hf-modal" hidden>
+    <div class="modal modal-wide">
+      <div class="modal-head">
+        <h3>⬇️ 从 HuggingFace 下载模型</h3>
+        <button class="btn small" data-close>✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="field"><label>仓库</label>
+          <input type="text" id="hf-repo" placeholder="例如 bartowski/Llama-3.2-1B-Instruct-GGUF">
+          <button class="btn" id="hf-list">📃 列出 GGUF 文件</button>
+        </div>
+        <div class="modal-info" id="hf-mirror"></div>
+        <div id="hf-downloads"></div>
+        <div id="hf-result"><div class="empty-hint">输入仓库名后点击"列出 GGUF 文件"，将显示可下载的量化版本。</div></div>
+      </div>
+      <div class="modal-foot">
+        <span class="modal-info" id="hf-status"></span>
+        <button class="btn" data-close>关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 缓存管理弹窗 -->
+  <div class="modal-overlay" id="cache-modal" hidden>
+    <div class="modal modal-wide">
+      <div class="modal-head">
+        <h3>🗂 官方缓存管理器 (~/.cache/llama.cpp)</h3>
+        <button class="btn small" data-close>✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="field"><label>缓存目录</label><b id="cache-root">—</b>
+          <button class="btn" id="cache-refresh">🔄 刷新</button>
+        </div>
+        <div id="cache-result"><div class="empty-hint">加载缓存列表…</div></div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" data-close>关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- API 调试弹窗 -->
+  <div class="modal-overlay" id="debug-modal" hidden>
+    <div class="modal modal-wide">
+      <div class="modal-head">
+        <h3>🛠 API 调试</h3>
+        <button class="btn small" data-close>✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="field"><label>实例</label>
+          <select id="dbg-session"></select>
+          <span class="dbg-tabs">
+            <button class="chip active" data-tpl="chat">💬 Chat</button>
+            <button class="chip" data-tpl="completions">📝 Completions</button>
+            <button class="chip" data-tpl="embeddings">🧬 Embeddings</button>
+          </span>
+        </div>
+
+        <!-- Chat 模板 -->
+        <div id="dbg-chat">
+          <div id="dbg-messages"></div>
+          <button class="btn small" id="dbg-add-msg">➕ 添加消息</button>
+          <div class="field" style="margin-top:8px">
+            <label>温度</label><input type="number" id="dbg-temperature" value="0.8" min="0" max="2" step="0.05" style="width:80px">
+            <label style="margin-left:12px">max_tokens</label><input type="number" id="dbg-max_tokens" value="256" style="width:90px">
+          </div>
+        </div>
+        <!-- Completions 模板 -->
+        <div id="dbg-completions" hidden>
+          <div class="field"><label>提示词</label><textarea id="dbg-prompt" rows="3" placeholder="输入一段提示词…"></textarea></div>
+          <div class="field"><label>温度</label><input type="number" id="dbg-c-temperature" value="0.8" min="0" max="2" step="0.05" style="width:80px"></div>
+        </div>
+        <!-- Embeddings 模板 -->
+        <div id="dbg-embeddings" hidden>
+          <div class="field"><label>输入</label><textarea id="dbg-emb-input" rows="2">你好世界</textarea></div>
+        </div>
+
+        <div class="action-bar">
+          <button class="btn primary" id="dbg-send">▶ 发送</button>
+          <button class="btn" id="dbg-stop" disabled>⏹ 停止</button>
+          <button class="btn" id="dbg-clear">🗑 清空输出</button>
+        </div>
+
+        <div class="dbg-stats" id="dbg-stats"></div>
+        <pre class="dbg-output" id="dbg-output"></pre>
+        <div class="dbg-history"><b>🕘 历史</b><div id="dbg-history"></div></div>
+      </div>
+      <div class="modal-foot"><button class="btn" data-close>关闭</button></div>
+    </div>
+  </div>
+
+  <!-- 使用洞察弹窗 -->
+  <div class="modal-overlay" id="insights-modal" hidden>
+    <div class="modal modal-wide">
+      <div class="modal-head">
+        <h3>📊 使用洞察</h3>
+        <button class="btn small" id="insights-refresh" title="刷新">🔄</button>
+        <button class="btn small" data-close>✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="insight-cards">
+          <div class="insight-card"><div class="ic-value" id="ins-total-tokens">—</div><div class="ic-label">累计 Token</div></div>
+          <div class="insight-card"><div class="ic-value" id="ins-total-sessions">—</div><div class="ic-label">历史会话</div></div>
+          <div class="insight-card"><div class="ic-value" id="ins-today-sessions">—</div><div class="ic-label">今日会话</div></div>
+          <div class="insight-card"><div class="ic-value" id="ins-success-rate">—</div><div class="ic-label">启动成功率</div></div>
+          <div class="insight-card"><div class="ic-value" id="ins-avg-tps">—</div><div class="ic-label">平均吞吐 tok/s</div></div>
+        </div>
+        <div class="insight-grid">
+          <div><div class="insight-title">🧾 Token 消耗（按模型）</div><div id="chart-tokens" class="chart" style="height:220px"></div></div>
+          <div><div class="insight-title">📅 Token 消耗（按日 · 近14天）</div><div id="chart-days" class="chart" style="height:220px"></div></div>
+          <div><div class="insight-title">🔥 模型热度（会话次数）</div><div id="chart-heat" class="chart" style="height:220px"></div></div>
+          <div><div class="insight-title">🚀 平均吞吐（按模型）</div><div id="chart-tps" class="chart" style="height:220px"></div></div>
+        </div>
+      </div>
+      <div class="modal-foot"><button class="btn" data-close>关闭</button></div>
+    </div>
+  </div>
+
+  <!-- MCP 管理弹窗 -->
+  <div class="modal-overlay" id="mcp-modal" hidden>
+    <div class="modal modal-wide">
+      <div class="modal-head">
+        <h3>🧩 MCP 服务器管理</h3>
+        <button class="btn small" id="mcp-refresh" title="刷新">🔄</button>
+        <button class="btn small" data-close>✕</button>
+      </div>
+      <div class="modal-body">
+        <fieldset class="cfg-group" style="margin-bottom:12px">
+          <legend>➕ 注册新服务器</legend>
+          <div class="field"><label>名称</label><input type="text" id="mcp-name" placeholder="filesystem"></div>
+          <div class="field"><label>命令</label><input type="text" id="mcp-command" placeholder="npx 或 npx.cmd 等"></div>
+          <div class="field"><label>参数</label><input type="text" id="mcp-args" placeholder="-y @modelcontextprotocol/server-filesystem D:/"></div>
+          <div class="field"><label></label><button class="btn primary" id="mcp-add">💾 注册</button></div>
+        </fieldset>
+        <div id="mcp-list"></div>
+      </div>
+      <div class="modal-foot"><button class="btn" data-close>关闭</button></div>
+    </div>
+  </div>
+
+  <!-- 设置弹窗 -->
+  <div class="modal-overlay" id="settings-modal" hidden>
+    <div class="modal">
+      <div class="modal-head">
+        <h3>⚙️ 全局设置</h3>
+        <button class="btn small" data-close>✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="field"><label>数据目录</label><input type="text" id="set-data-dir" disabled title="需重启生效"></div>
+        <div class="field"><label>llama-server 可执行文件</label><input type="text" id="set-binary" placeholder="例: D:\llama\llama-server.exe（完整路径含文件名，或 PATH 中的 llama-server）" title="填 llama-server 可执行文件的完整路径（含 .exe 文件名），不是文件夹；若已加入系统 PATH，填 llama-server 即可"></div>
+        <div class="field"><label>日志保留(天)</label><input type="number" id="set-retention" min="1" max="365" value="30"></div>
+        <div class="field"><label>HF 镜像端点</label><input type="text" id="set-hf" placeholder="留空 = huggingface.co，可填 https://hf-mirror.com"></div>
+        <div class="field"><label>模型缓存目录</label><input type="text" id="set-cache-dir" placeholder="留空 = 默认 ~/.cache/llama.cpp" title="llama.cpp 的 HF 下载缓存目录。用 📂 浏览选一个父目录后，会自动在其下追加 \\llama-cache 作为缓存子目录（避免缓存堆在所选目录根）；也可直接手填完整路径。留空使用默认 C:\Users\long\.cache\llama.cpp"><button class="btn small" id="set-cache-browse" title="浏览选择目录（自动追加 llama-cache 子目录）">📂 浏览</button></div>
+        <div class="field"><label>全局 API Key（所有实例自动注入）</label>
+          <input type="password" id="set-api-key" placeholder="可选，AES-256 加密存储" autocomplete="new-password">
+          <button class="btn small" id="set-key-gen" title="自动生成随机 API Key">🎲 生成</button>
+          <button class="btn small" id="set-key-copy" title="复制到剪贴板">📋</button>
+          <button class="btn small" id="set-key-toggle" title="显示/隐藏（已保存时点击查看明文）">👁</button>
+          <button class="btn small" id="set-key-clear" title="清除已存 Key">🗑</button>
+        </div>
+        <div class="modal-info" id="set-key-hint"></div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" data-close>取消</button>
+        <button class="btn primary" id="set-save">💾 保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 参数说明弹窗 -->
+  <div class="modal-overlay" id="params-modal" hidden>
+    <div class="modal modal-wide">
+      <div class="modal-head">
+        <h3>📖 参数说明与调整方法</h3>
+        <button class="btn small" data-close>✕</button>
+      </div>
+      <div class="modal-body" id="params-body">
+        <div class="empty-hint">⏳ 正在加载参数说明…</div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" data-close>关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 批量测试弹窗（多模型 / 参数扫描） -->
+  <div class="modal-overlay" id="test-modal" hidden>
+    <div class="modal modal-wide">
+      <div class="modal-head">
+        <h3>🧪 模型测试</h3>
+        <button class="btn small" data-close>✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="tabbar" id="test-tabs">
+          <button class="tab active" data-tab="batch">🖥 多模型测试</button>
+          <button class="tab" data-tab="sweep">🔬 参数扫描</button>
+        </div>
+
+        <!-- 多模型批量测试 -->
+        <div class="tab-pane" id="tab-batch">
+          <div class="field"><label>测试提问</label><input type="text" id="test-prompt" value="你好，用一句话介绍你自己"></div>
+          <div class="field"><label>最大生成 token</label><input type="number" id="test-max-tokens" value="16" min="1" max="512"></div>
+          <div class="modal-info" style="margin:4px 0 8px">每个模型会依次启动 → 发一条测试消息 → 自动停止。大模型加载较慢，请耐心等待。</div>
+          <div id="test-models" class="test-model-list"></div>
+          <div id="test-result"></div>
+        </div>
+
+        <!-- 单模型参数扫描 -->
+        <div class="tab-pane" id="tab-sweep" hidden>
+          <div class="field"><label>选择模型</label><select id="sweep-model" class="sel"></select></div>
+          <div class="field-row">
+            <div class="field grow"><label>测试提问</label><input type="text" id="sweep-prompt" value="你好，用一句话介绍你自己"></div>
+            <div class="field"><label>最大生成 token</label><input type="number" id="sweep-max-tokens" value="16" min="1" max="512" style="width:96px"></div>
+          </div>
+          <div class="modal-info" style="margin:2px 0 6px">逗号分隔填 <strong>多个值</strong> = 该参数参与扫描组合；填 <strong>单个值</strong> = 该参数<strong>固定</strong>用于每个组合（例如固定上下文 16384，只扫 GPU 层数）。留空 = 不参与（用默认值）。</div>
+          <div class="sweep-modebar">
+            <span class="sm-label">模式</span>
+            <button class="chip active" data-smode="exhaustive" title="测试所有参数组合的笛卡尔积">⚡ 穷举扫描</button>
+            <button class="chip" data-smode="greedy" title="逐个参数依次优化，其余参数固定在当前最优（推荐，数量大时快很多）">🔍 智能寻优</button>
+            <button class="btn tiny" id="btn-sweep-fillall" hidden title="给所有参数填入常用档位，智能寻优时全部参数都会参与（穷举模式会组合爆炸不建议）">🪄 全参数</button>
+          </div>
+          <div id="sweep-params"></div>
+          <div id="sweep-estimate" class="sweep-est"></div>
+          <div id="sweep-result"></div>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <span class="modal-info" id="test-summary"></span>
+        <span class="savecfg-row" id="savecfg-row" hidden>
+          <input type="text" id="savecfg-name" placeholder="配置名称（如 2048ctx·GPU33）" style="width:230px">
+          <button class="btn primary" id="savecfg-confirm">💾 保存</button>
+          <button class="btn" id="savecfg-cancel">取消</button>
+        </span>
+        <button class="btn" id="test-savecfg" hidden title="把这次测试的最优参数保存到模型库，下次一键套用">💾 保存最优配置</button>
+        <button class="btn primary" id="test-start">▶ 开始测试</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 文件/目录浏览器弹窗 -->
+  <div class="modal-overlay" id="fs-modal" hidden>
+    <div class="modal modal-wide">
+      <div class="modal-head">
+        <h3 id="fs-title">📂 浏览</h3>
+        <button class="btn small" data-close>✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="field"><label>路径</label>
+          <input type="text" id="fs-path" placeholder="输入目录路径">
+          <button class="btn" id="fs-go">📂 打开</button>
+        </div>
+        <div class="fs-toolbar">
+          <button class="btn small" id="fs-up">⬆ 上级</button>
+          <button class="btn small primary" id="fs-select" hidden>✅ 选择当前目录</button>
+          <button class="btn small" id="fs-home">🏠 根目录</button>
+          <span class="modal-info" id="fs-info"></span>
+        </div>
+        <div id="fs-list" class="fs-list">
+          <div class="empty-hint">加载中…</div>
+        </div>
+      </div>
+      <div class="modal-foot"><button class="btn" data-close>取消</button></div>
+    </div>
+  </div>
+
+  <script src="js/ws.js"></script>
+  <script src="js/charts.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

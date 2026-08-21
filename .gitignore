@@ -3,7 +3,8 @@ llama-commander.exe
 llama-commander
 *.exe
 *.exe~
-dist/
+# 仅根目录的跨平台构建输出（/dist/），不匹配 internal/webui/dist/（go:embed 需要）
+/dist/
 
 # 运行时数据（本地模型/会话/日志/密钥）——绝不提交 .secret / config / bundles
 data/

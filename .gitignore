@@ -1,0 +1,25 @@
+# 编译产物
+llama-commander.exe
+llama-commander
+*.exe
+*.exe~
+dist/
+
+# 运行时数据（本地模型/会话/日志/密钥）——绝不提交 .secret / config / bundles
+data/
+!data/config.example.json
+
+# 本地测试与临时
+logs/
+binaries/
+scratch/
+testmodels/
+*.tmp
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# 用户本地副本
+web/dist/

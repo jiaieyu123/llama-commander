@@ -1401,3 +1401,19 @@ body[data-layout="dash"] #metrics-panel .chart { height: 240px !important; }
 #log-panel .log-console { height: 460px !important; }
 body[data-layout="dash"] #log-panel .log-console { height: 340px !important; }
 body[data-compact="1"] #log-panel .log-console { height: 380px !important; }
+
+/* —— ⑬ 紫色主题适配三栏外壳（毛玻璃 + 硬编码背景） —— */
+body[data-theme="violet"] .sidebar { background: rgba(19, 13, 40, 0.9); border-right-color: var(--border); }
+body[data-theme="violet"] .topbar { background: rgba(19, 13, 40, 0.78); }
+body[data-theme="violet"] .sidebar .main-tab:hover,
+body[data-theme="violet"] .sidebar .side-tool:hover { background: var(--accent-soft); }
+body[data-theme="violet"] .sidebar-promo { background: linear-gradient(160deg, rgba(139, 92, 246, 0.2), rgba(236, 72, 153, 0.12)); }
+body[data-theme="violet"] .sidebar-search { background: var(--bg-2); border-color: var(--border); }
+body[data-theme="violet"] .field input, body[data-theme="violet"] .field select,
+body[data-theme="violet"] .log-tools input, body[data-theme="violet"] .log-tools select,
+body[data-theme="violet"] .num-wrap input, body[data-theme="violet"] .sweep-row input,
+body[data-theme="violet"] #dbg-messages .msg-row select, body[data-theme="violet"] #dbg-messages .msg-row textarea {
+  background: var(--bg-2); color: var(--text); border-color: var(--border);
+}
+body[data-theme="violet"] .metric { background: var(--panel-2); }
+body[data-theme="violet"] .avatar { border-color: #0d0a17; }

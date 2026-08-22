@@ -53,16 +53,25 @@ Llama Commander 是一个基于 Web 的图形化管理工具，为 [llama.cpp](h
 
 ---
 
-## � 界面预览
+## 界面预览
 
 ![主界面](docs/screenshots/main.png)
-*主界面：模型选择、参数配置、实时命令预览、运行实例与日志控制台*
+*主界面：模型选择、参数配置、实时命令预览、运行实例与日志控制台（紫色主题）*
+
+![性能监控](docs/screenshots/monitor.png)
+*性能监控：KPI 指标卡、吞吐趋势图、每实例实时监控（输入/输出 token、速率、KV 占用）*
+
+![运行实例](docs/screenshots/instances.png)
+*运行实例：状态徽章、端口、运行时长、一键停止/重启/打开界面*
+
+![日志控制台](docs/screenshots/console.png)
+*日志控制台：分级过滤、实例筛选、搜索、自动滚动、导出*
 
 ![模型库](docs/screenshots/library.png)
 *模型库：扫描导入、智能捆绑（mmproj / MTP / LoRA / 分片）*
 
-![MTP 投机解码](docs/screenshots/mtp.png)
-*MTP 投机解码：加载 Qwen3-MTP 模型自动启用，2~3 倍解码加速*
+![工具扩展 MCP](docs/screenshots/mcp.png)
+*工具扩展 MCP：模板库一键添加、健康检测、绑定模型*
 
 ![批量测试与参数扫描](docs/screenshots/test.png)
 *批量测试与参数扫描：穷举寻优 / 智能寻优*
@@ -70,9 +79,18 @@ Llama Commander 是一个基于 Web 的图形化管理工具，为 [llama.cpp](h
 ![使用洞察](docs/screenshots/insights.png)
 *使用洞察：Token 统计、模型热度、吞吐仪表盘*
 
+![实时监控](docs/screenshots/monitor-modal.png)
+*实时监控：每实例趋势图、请求历史、CSV 导出*
+
+![API 调试](docs/screenshots/debug.png)
+*API 调试：Chat / Completions / Embeddings 一键调试*
+
+![全局设置](docs/screenshots/settings.png)
+*全局设置：接口地址、API Key 加密存储、界面主题（暗色/奶白/SaaS 浅紫/紫色）*
+
 ---
 
-## �🚀 快速开始
+## 🚀 快速开始
 
 ### 环境要求
 | 组件 | 说明 |

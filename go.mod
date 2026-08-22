@@ -1,4 +1,4 @@
-module llama-commander
+module llama-launcher
 
 go 1.24.0
 

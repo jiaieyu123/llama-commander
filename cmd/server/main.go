@@ -1,10 +1,10 @@
-// Llama Commander — llama.cpp 智能启动管理器
+// Llama Launcher — llama.cpp 智能启动管理器
 //
 // 主入口：HTTP REST API + WebSocket 日志流 + 内嵌静态前端 + 子进程生命周期管理。
 // 用法:
 //
-//	llama-commander                      启动 Web 服务
-//	llama-commander parse <model.gguf>   单独测试 GGUF 解析
+//	llama-launcher                      启动 Web 服务
+//	llama-launcher parse <model.gguf>   单独测试 GGUF 解析
 package main
 
 import (
@@ -32,20 +32,20 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"llama-commander/internal/bundle"
-	"llama-commander/internal/config"
-	"llama-commander/internal/downloader"
-	"llama-commander/internal/fsbrowse"
-	"llama-commander/internal/gguf"
-	"llama-commander/internal/llama"
-	"llama-commander/internal/mcp"
-	"llama-commander/internal/secure"
-	"llama-commander/internal/session"
-	"llama-commander/internal/webui"
+	"llama-launcher/internal/bundle"
+	"llama-launcher/internal/config"
+	"llama-launcher/internal/downloader"
+	"llama-launcher/internal/fsbrowse"
+	"llama-launcher/internal/gguf"
+	"llama-launcher/internal/llama"
+	"llama-launcher/internal/mcp"
+	"llama-launcher/internal/secure"
+	"llama-launcher/internal/session"
+	"llama-launcher/internal/webui"
 )
 
 // Version of the manager itself.
-const Version = "0.1.0-skeleton"
+const Version = "0.2.0"
 
 // Launch error sentinels, mapped to HTTP statuses in the handlers.
 var (
@@ -354,7 +354,7 @@ func (a *App) writeJSON(w http.ResponseWriter, code int, v any) {
 
 func (a *App) handleHealth(w http.ResponseWriter, r *http.Request) {
 	a.writeJSON(w, http.StatusOK, map[string]any{
-		"name":    "llama-commander",
+		"name":    "llama-launcher",
 		"version": Version,
 		"status":  "ok",
 		"running": a.sessions.RunningCount(),
@@ -3517,7 +3517,7 @@ func main() {
 	srv := &http.Server{Addr: addr, Handler: app.routes()}
 
 	go func() {
-		log.Printf("🚀 Llama Commander v%s 已启动: http://%s", Version, addr)
+		log.Printf("🚀 Llama Launcher v%s 已启动: http://%s", Version, addr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("服务异常: %v", err)
 		}
@@ -3541,10 +3541,10 @@ func main() {
 	log.Println("已退出")
 }
 
-// runParse implements `llama-commander parse <path>`.
+// runParse implements `llama-launcher parse <path>`.
 func runParse(args []string) {
 	if len(args) < 1 {
-		log.Fatal("用法: llama-commander parse <model.gguf>")
+		log.Fatal("用法: llama-launcher parse <model.gguf>")
 	}
 	info, err := gguf.Parse(args[0])
 	if err != nil {

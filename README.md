@@ -1,10 +1,14 @@
-# 🚀 Llama Commander
+<p align="center">
+  <img src="docs/llama-launcher-logo.png" alt="Llama Launcher" width="520">
+</p>
+
+# 🚀 Llama Launcher
 
 > llama.cpp 智能启动管理器 —— 像使用软件一样管理你的 AI 模型
 
-Llama Commander 是一个基于 Web 的图形化管理工具，为 [llama.cpp](https://github.com/ggml-org/llama.cpp) 提供完整的模型管理、参数配置、多实例控制与性能监控能力。单二进制、开箱即用，无需任何前端/后端开发环境。
+Llama Launcher 是一个基于 Web 的图形化管理工具，为 [llama.cpp](https://github.com/ggml-org/llama.cpp) 提供完整的模型管理、参数配置、多实例控制与性能监控能力。单二进制、开箱即用，无需任何前端/后端开发环境。
 
-![GitHub release](https://img.shields.io/badge/release-v0.1-blue)
+![GitHub release](https://img.shields.io/badge/release-v0.2-blue)
 ![Go](https://img.shields.io/badge/Go-1.24+-00ADD8)
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)
 ![License](https://img.shields.io/badge/License-MIT-green)
@@ -114,7 +118,7 @@ Llama Commander 是一个基于 Web 的图形化管理工具，为 [llama.cpp](h
 go run cmd/server/main.go
 
 # 编译单二进制（前端已内嵌，约 10MB）
-go build -o llama-commander.exe ./cmd/server
+go build -o llama-launcher.exe ./cmd/server
 
 # 跨平台打包（Win / Linux / macOS → dist/）
 powershell -File scripts/build-all.ps1
@@ -128,7 +132,7 @@ go test ./...
 |------|------|
 | `go run cmd/server/main.go` | 启动管理器 |
 | `go run cmd/server/main.go parse <模型.gguf>` | 单独测试 GGUF 解析 |
-| `go build -o llama-commander.exe ./cmd/server` | 编译 EXE |
+| `go build -o llama-launcher.exe ./cmd/server` | 编译 EXE |
 | `powershell -File scripts/sync-web.ps1` | 前端镜像同步（改 `internal/webui/dist/` 后运行） |
 | `powershell -File scripts/build-all.ps1` | 跨平台打包 |
 | `powershell -File scripts/start.ps1 -Port 8114 -NoBrowser` | 自定义端口启动 |

@@ -46,7 +46,7 @@ type hfTreeEntry struct {
 	Size *int64 `json:"size"`
 }
 
-func userAgent() string { return "llama-commander/0.1" }
+func userAgent() string { return "llama-launcher/0.1" }
 
 // ListFiles returns every .gguf file (including mmproj/draft) in the repo.
 // revision defaults to "main".

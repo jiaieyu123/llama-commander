@@ -148,7 +148,7 @@
     const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = 'llama-commander-' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-') + '.log';
+    a.download = 'llama-launcher-' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-') + '.log';
     a.click();
     URL.revokeObjectURL(a.href);
   });

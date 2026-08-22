@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#6a5ae0"/>
+      <stop offset="100%" stop-color="#ec4899"/>
+    </linearGradient>
+    <linearGradient id="flame" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0%" stop-color="#fbbf24"/>
+      <stop offset="100%" stop-color="#fb7185"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 背景圆角方块 -->
+  <rect x="10" y="10" width="180" height="180" rx="44" fill="url(#bg)"/>
+
+  <!-- 火箭（发射/启动意象） -->
+  <g transform="translate(28,34)">
+    <!-- 尾焰 -->
+    <path d="M 40 92 L 28 118 L 40 108 L 52 118 Z" fill="url(#flame)"/>
+    <!-- 机身 -->
+    <rect x="27" y="16" width="26" height="74" rx="13" fill="#ffffff"/>
+    <!-- 舱窗 -->
+    <circle cx="40" cy="42" r="10" fill="#8b5cf6"/>
+    <!-- 火箭头 -->
+    <path d="M 27 16 Q 40 -10 53 16 Z" fill="#ffffff"/>
+    <!-- 侧翼 -->
+    <path d="M 27 64 L 10 88 L 27 81 Z" fill="#ffffff"/>
+    <path d="M 53 64 L 70 88 L 53 81 Z" fill="#ffffff"/>
+  </g>
+
+  <!-- 羊驼（llama 意象） -->
+  <g transform="translate(106,30)">
+    <!-- 耳朵 -->
+    <path d="M 22 26 Q 16 6 30 12 Q 30 20 26 26 Z" fill="#f5d0a9"/>
+    <path d="M 38 26 Q 34 4 48 10 Q 46 18 42 26 Z" fill="#f5d0a9"/>
+    <!-- 头 -->
+    <ellipse cx="36" cy="44" rx="22" ry="24" fill="#f5d0a9"/>
+    <!-- 脸 -->
+    <ellipse cx="34" cy="48" rx="16" ry="17" fill="#fde8c8"/>
+    <!-- 眼睛 -->
+    <circle cx="28" cy="42" r="3" fill="#3b2f2f"/>
+    <circle cx="42" cy="42" r="3" fill="#3b2f2f"/>
+    <!-- 鼻子/嘴 -->
+    <path d="M 30 54 Q 36 60 42 54" stroke="#3b2f2f" stroke-width="2" fill="none" stroke-linecap="round"/>
+    <!-- 脖子 -->
+    <path d="M 22 62 L 8 96 L 40 96 L 44 64 Z" fill="#f5d0a9"/>
+    <!-- 围巾 -->
+    <rect x="6" y="88" width="40" height="10" rx="5" fill="#ffffff"/>
+  </g>
+</svg>

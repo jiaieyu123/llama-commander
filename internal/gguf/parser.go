@@ -1,6 +1,6 @@
 // Package gguf implements a lightweight reader for the GGUF (GPT-Generated
 // Unified Format) file header. It is intentionally dependency-free and only
-// extracts the model metadata needed by Llama Commander (architecture, block
+// extracts the model metadata needed by Llama Launcher (architecture, block
 // count, context length, KV heads, etc.).
 package gguf
 

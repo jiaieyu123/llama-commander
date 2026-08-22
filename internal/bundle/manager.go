@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"llama-commander/internal/gguf"
+	"llama-launcher/internal/gguf"
 )
 
 // SourceType describes where the bundle's model originates.

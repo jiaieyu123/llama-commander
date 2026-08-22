@@ -229,7 +229,7 @@ var paramHelp = map[string]string{
 	"cors_credentials":   "CORS 响应携带凭据（Access-Control-Allow-Credentials）。",
 	"no_webui":           "禁用内置 Web UI（只留 API）。",
 	"ui_config":          "JSON 形式的默认 UI 设置（覆盖 UI 默认值）。如 {\"dark_mode\":true}。",
-	"slots":              "暴露 /slots 槽位监控端点（默认关）。配合 llama-commander 监控面板可查看各槽位上下文占用。",
+	"slots":              "暴露 /slots 槽位监控端点（默认关）。配合 llama-launcher 监控面板可查看各槽位上下文占用。",
 	"path":               "静态文件服务目录（--path 指定）。",
 	"media_path":         "本地媒体文件目录（供 file:// 引用图片/音频）。",
 	"alias":              "模型别名（API 中 models 列表显示的名字）。",

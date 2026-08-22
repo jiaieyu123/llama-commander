@@ -1,4 +1,4 @@
-# Llama Commander - cross-platform release build script.
+# Llama Launcher - cross-platform release build script.
 # Builds single binaries for Windows / Linux / macOS into ./dist.
 # NOTE: keep this file ASCII-only so PowerShell 5.1 parses it without a BOM.
 $ErrorActionPreference = "Stop"
@@ -16,7 +16,7 @@ New-Item -ItemType Directory -Force $outDir | Out-Null
 foreach ($b in $builds) {
     $env:GOOS = $b.OS
     $env:GOARCH = $b.Arch
-    $name = "llama-commander-$($b.OS)-$($b.Arch)$($b.Ext)"
+    $name = "llama-launcher-$($b.OS)-$($b.Arch)$($b.Ext)"
     Write-Host "Building $name ..."
     go build -trimpath -ldflags "-s -w" -o (Join-Path $outDir $name) ./cmd/server
     if ($LASTEXITCODE -ne 0) { throw "build failed for $($b.OS)/$($b.Arch)" }

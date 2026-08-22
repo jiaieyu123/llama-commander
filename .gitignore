@@ -1,6 +1,6 @@
 # 编译产物
-llama-commander.exe
-llama-commander
+llama-launcher.exe
+llama-launcher
 *.exe
 *.exe~
 # 仅根目录的跨平台构建输出（/dist/），不匹配 internal/webui/dist/（go:embed 需要）
@@ -25,5 +25,5 @@ testmodels/
 # 用户本地副本
 web/dist/
 
-# ���Ը��������
+# ���Ը��������
 coverage

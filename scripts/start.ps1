@@ -1,4 +1,4 @@
-# Llama Commander - one-click start script.
+# Llama Launcher - one-click start script.
 # NOTE: keep this file ASCII-only so PowerShell 5.1 parses it without a BOM.
 #
 # Usage:
@@ -34,7 +34,7 @@ if (-not (Get-Command go -ErrorAction SilentlyContinue)) {
 $env:GOPROXY = "https://goproxy.cn,direct"
 
 # 2) Decide whether to rebuild (skip when -NoBuild).
-$exe = Join-Path $root "llama-commander.exe"
+$exe = Join-Path $root "llama-launcher.exe"
 $needBuild = $ForceBuild
 if (-not $needBuild -and -not $NoBuild) {
     if (-not (Test-Path $exe)) {
@@ -50,11 +50,11 @@ if (-not $needBuild -and -not $NoBuild) {
 if ($needBuild -and -not $NoBuild) {
     Write-Host "[BUILD] Syncing web assets and compiling..." -ForegroundColor Cyan
     powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\sync-web.ps1" | Out-Null
-    go build -o llama-commander.exe ./cmd/server
+    go build -o llama-launcher.exe ./cmd/server
     if ($LASTEXITCODE -ne 0) { Write-Host "[ERROR] Build failed." -ForegroundColor Red; exit 1 }
     Write-Host "[OK] Build done." -ForegroundColor Green
 } else {
-    Write-Host "[SKIP] Using existing llama-commander.exe (use -ForceBuild to rebuild)." -ForegroundColor DarkGray
+    Write-Host "[SKIP] Using existing llama-launcher.exe (use -ForceBuild to rebuild)." -ForegroundColor DarkGray
 }
 
 # 3) Port conflict check.
@@ -62,9 +62,9 @@ $conn = Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction Silentl
 if ($conn) {
     $owner = $conn | Select-Object -First 1 -ExpandProperty OwningProcess
     $proc = Get-Process -Id $owner -ErrorAction SilentlyContinue
-    if ($proc -and $proc.ProcessName -match 'llama-commander') {
+    if ($proc -and $proc.ProcessName -match 'llama-launcher') {
         if ($Restart) {
-            Write-Host "[RESTART] Stopping existing llama-commander on port $Port (PID $owner)..." -ForegroundColor Yellow
+            Write-Host "[RESTART] Stopping existing llama-launcher on port $Port (PID $owner)..." -ForegroundColor Yellow
             Stop-Process -Id $owner -Force -ErrorAction SilentlyContinue
             $wait = 0
             while ((Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue) -and $wait -lt 5000) {
@@ -72,7 +72,7 @@ if ($conn) {
                 $wait += 200
             }
         } else {
-            Write-Host "[INFO] Llama Commander is already running on port $Port." -ForegroundColor Green
+            Write-Host "[INFO] Llama Launcher is already running on port $Port." -ForegroundColor Green
             if (-not $NoBrowser) { Start-Process "http://127.0.0.1:$Port" }
             Write-Host "[INFO] Opened the app. Use -Restart to stop it and start fresh." -ForegroundColor DarkGray
             exit 0
@@ -88,5 +88,5 @@ if ($conn) {
 if (-not $NoBrowser) {
     Start-Process "http://127.0.0.1:$Port"
 }
-Write-Host "[OK] Starting Llama Commander at http://127.0.0.1:$Port" -ForegroundColor Green
-& .\llama-commander.exe --port $Port
+Write-Host "[OK] Starting Llama Launcher at http://127.0.0.1:$Port" -ForegroundColor Green
+& .\llama-launcher.exe --port $Port

@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"llama-commander/internal/gguf"
+	"llama-launcher/internal/gguf"
 )
 
 // CompanionHints lists companion files detected next to a primary model.

@@ -1,4 +1,4 @@
-# Llama Commander - frontend mirror sync script.
+# Llama Launcher - frontend mirror sync script.
 # Mirrors internal/webui/dist (the go:embed source) to web/dist (external hosting copy).
 # NOTE: keep this file ASCII-only so PowerShell 5.1 parses it without a BOM.
 param(

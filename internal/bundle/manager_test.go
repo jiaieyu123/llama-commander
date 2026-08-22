@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"llama-commander/internal/gguf"
+	"llama-launcher/internal/gguf"
 	"os"
 	"path/filepath"
 	"strings"

@@ -1022,6 +1022,16 @@ body {
 }
 .sidebar-brand-name { overflow: hidden; text-overflow: ellipsis; }
 .sidebar .badge-ver { font-size: 10px; flex: none; }
+/* 品牌 Logo：图片版（覆盖 emoji 版样式：去掉渐变背景，直接显示圆角图标） */
+.sidebar-brand .brand-logo {
+  background: none;
+  color: transparent;
+  box-shadow: none;
+  object-fit: cover;
+  border-radius: 10px;
+}
+.sidebar-brand .brand-logo:hover { transform: scale(1.05); }
+.sidebar-brand .brand-logo { transition: transform 0.15s ease; }
 /* 全局搜索框（胶囊） */
 .sidebar-search {
   display: flex;

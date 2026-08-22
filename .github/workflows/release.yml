@@ -46,13 +46,13 @@ jobs:
           GOARCH: ${{ matrix.arch }}
           CGO_ENABLED: '0'
         run: |
-          go build -trimpath -ldflags "-s -w" -o llama-commander-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }} ./cmd/server
+          go build -trimpath -ldflags "-s -w" -o llama-launcher-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }} ./cmd/server
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: llama-commander-${{ matrix.os }}-${{ matrix.arch }}
-          path: llama-commander-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}
+          name: llama-launcher-${{ matrix.os }}-${{ matrix.arch }}
+          path: llama-launcher-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}
           if-no-files-found: error
 
   release:

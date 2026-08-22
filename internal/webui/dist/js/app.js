@@ -1,4 +1,4 @@
-// app.js — Llama Commander 前端主逻辑
+// app.js — Llama Launcher 前端主逻辑
 (function () {
   'use strict';
 

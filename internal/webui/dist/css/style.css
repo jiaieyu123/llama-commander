@@ -964,15 +964,19 @@ body[data-theme="light"] .log-line.WARN { color: #92600a; }
 body {
   display: flex;
   align-items: stretch;
+  /* 覆盖基础 html,body{height:100%}：高度随内容增长，侧边栏才能 stretch 到与主区等高 */
+  height: auto;
   min-height: 100vh;
 }
 #sidebar {
   flex: none;
   width: 248px;
-  position: sticky;
-  top: 0;
-  height: 100vh;
-  overflow-y: auto;
+  /* 让侧边栏与右侧内容等高、底部对齐（body flex stretch）：
+     不再用 sticky+100vh 固定视口高度，而是跟随页面内容一起滚动到底 */
+  position: relative;
+  height: auto;
+  min-height: 100vh;
+  overflow-y: visible;
   z-index: 40;
 }
 .main-area {

@@ -5,6 +5,7 @@ package config
 
 import (
 	"context"
+	"fmt"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -49,29 +50,31 @@ func DetectHardware(ctx context.Context) (*HardwareInfo, error) {
 
 // ModelSpec is the minimum model information required by the estimator.
 type ModelSpec struct {
-	FileSizeMB    float64 // approximate weight size in MB
-	BlockCount    uint64
-	ContextLength uint64
-	HeadCountKV   uint64
+	FileSizeMB      float64 // approximate weight size in MB
+	BlockCount      uint64
+	ContextLength   uint64
+	HeadCountKV     uint64
 	EmbeddingLength uint64
-	Architecture  string
-	IsMoE         bool
-	NumExperts    uint64
+	Architecture    string
+	IsMoE           bool
+	NumExperts      uint64
+	MMProjSizeMB    float64 // vision projector size in MB (0 = none)
 }
 
 // Recommendation is the output of the one-click optimizer.
 type Recommendation struct {
-	NGPULayers     int      `json:"n_gpu_layers"` // -1 == auto
-	CtxSize        int      `json:"ctx_size"`
-	FlashAttn      string   `json:"flash_attn"` // on/off/auto
-	Threads        int      `json:"threads"`
-	KVCacheK       string   `json:"kv_cache_k"`
-	KVCacheV       string   `json:"kv_cache_v"`
-	LoadMode       string   `json:"load_mode"`
-	CPUMoE         bool     `json:"cpu_moe"`
-	Parallel       int      `json:"parallel"` // -1 == auto
-	EstimatedVRAMGB float64 `json:"estimated_vram_gb"`
-	Notes          []string `json:"notes"`
+	NGPULayers      int      `json:"n_gpu_layers"` // -1 == auto
+	CtxSize         int      `json:"ctx_size"`
+	FlashAttn       string   `json:"flash_attn"` // on/off/auto
+	Threads         int      `json:"threads"`
+	KVCacheK        string   `json:"kv_cache_k"`
+	KVCacheV        string   `json:"kv_cache_v"`
+	LoadMode        string   `json:"load_mode"`
+	CPUMoE          bool     `json:"cpu_moe"`
+	Parallel        int      `json:"parallel"` // -1 == auto
+	EstimatedVRAMGB float64  `json:"estimated_vram_gb"`
+	MMProjCPU       bool     `json:"mmproj_cpu"` // run vision projector on CPU
+	Notes           []string `json:"notes"`
 }
 
 // Recommend computes parameters for the requested scene preset.
@@ -119,10 +122,23 @@ func (h *HardwareInfo) Recommend(spec ModelSpec, scene string) *Recommendation {
 	}
 	rec.CtxSize = int(ctx)
 
+	// Vision projector: offloading mmproj steals VRAM from the main model. In
+	// speed/lowvram scenes suggest keeping it on the CPU instead (pure-text use).
+	mmprojCPU := false
+	if spec.MMProjSizeMB > 0 {
+		switch scene {
+		case "speed", "lowvram":
+			mmprojCPU = true
+			rec.Notes = append(rec.Notes,
+				fmt.Sprintf("检测到视觉投影 mmproj (%.0f MB)，建议勾选「mmproj 走 CPU」以把显存让给主模型层（纯文本场景）", spec.MMProjSizeMB))
+		}
+	}
+	rec.MMProjCPU = mmprojCPU
+
 	// GPU layers
 	if h.GPUCount > 0 && h.TotalVRAMMB > 0 {
-		rec.NGPULayers = h.estimateLayers(spec, ctx, scene)
-		rec.EstimatedVRAMGB = EstimateVRAM(spec, rec.NGPULayers, rec.CtxSize, h)
+		rec.NGPULayers = h.estimateLayers(spec, ctx, scene, rec.KVCacheK, rec.KVCacheV, mmprojCPU)
+		rec.EstimatedVRAMGB = EstimateVRAMEx(spec, rec.NGPULayers, rec.CtxSize, h, rec.KVCacheK, rec.KVCacheV, mmprojCPU)
 	} else {
 		rec.NGPULayers = 0
 		rec.Notes = append(rec.Notes, "未检测到 GPU，将使用纯 CPU 推理")
@@ -132,7 +148,9 @@ func (h *HardwareInfo) Recommend(spec ModelSpec, scene string) *Recommendation {
 
 // estimateLayers iterates candidate layer counts to find the largest one that
 // fits within available VRAM (leaving a 1.5GB safety margin, 2GB in lowvram).
-func (h *HardwareInfo) estimateLayers(spec ModelSpec, ctx uint64, scene string) int {
+// It accounts for KV cache type and mmproj placement so the result matches
+// what the launch command will actually consume.
+func (h *HardwareInfo) estimateLayers(spec ModelSpec, ctx uint64, scene, kvK, kvV string, mmprojCPU bool) int {
 	if spec.BlockCount == 0 || spec.FileSizeMB <= 0 {
 		return -1 // unknown → auto
 	}
@@ -148,11 +166,9 @@ func (h *HardwareInfo) estimateLayers(spec ModelSpec, ctx uint64, scene string) 
 	if budget <= 0 {
 		return 0
 	}
-	weightPerLayer := spec.FileSizeMB / float64(spec.BlockCount)
-	_ = weightPerLayer // full computation uses EstimateVRAM below
 	best := 0
 	for l := uint64(0); l <= spec.BlockCount; l++ {
-		est := EstimateVRAM(spec, int(l), int(ctx), h)
+		est := EstimateVRAMEx(spec, int(l), int(ctx), h, kvK, kvV, mmprojCPU)
 		if est*1024.0 <= budget { // est is in GB
 			best = int(l)
 		} else {
@@ -165,9 +181,28 @@ func (h *HardwareInfo) estimateLayers(spec ModelSpec, ctx uint64, scene string) 
 	return best
 }
 
-// EstimateVRAM returns the estimated VRAM footprint in GB for a given
-// GPU-layer count and context. It accounts for offloaded weights + KV cache.
-func EstimateVRAM(spec ModelSpec, ngl int, ctx int, h *HardwareInfo) float64 {
+// kvBytesPerElement returns the bytes per KV-cache element for a cache type.
+func kvBytesPerElement(kind string) float64 {
+	switch kind {
+	case "f32":
+		return 4.0
+	case "bf16", "f16":
+		return 2.0
+	case "q8_0":
+		return 1.0
+	case "q4_0", "q4_1", "iq4_nl":
+		return 0.5
+	case "q5_0", "q5_1":
+		return 0.625
+	default:
+		return 2.0
+	}
+}
+
+// EstimateVRAMEx returns the estimated VRAM footprint in GB for a given
+// GPU-layer count, context, KV cache types and mmproj placement. It accounts
+// for offloaded weights + KV cache + vision projector (when GPU-offloaded).
+func EstimateVRAMEx(spec ModelSpec, ngl int, ctx int, h *HardwareInfo, kvK, kvV string, mmprojCPU bool) float64 {
 	weightGB := 0.0
 	if spec.BlockCount > 0 {
 		frac := float64(ngl) / float64(spec.BlockCount)
@@ -176,10 +211,20 @@ func EstimateVRAM(spec ModelSpec, ngl int, ctx int, h *HardwareInfo) float64 {
 		}
 		weightGB = spec.FileSizeMB / 1024.0 * frac
 	}
-	kvBytesPerToken := float64(spec.HeadCountKV) * float64(spec.EmbeddingLength) * 2.0 // ~2 bytes per element
+	if !mmprojCPU && spec.MMProjSizeMB > 0 {
+		weightGB += spec.MMProjSizeMB / 1024.0
+	}
+	kvBytesPerToken := float64(spec.HeadCountKV) * float64(spec.EmbeddingLength) *
+		(kvBytesPerElement(kvK) + kvBytesPerElement(kvV))
 	kvGB := (float64(ctx) * kvBytesPerToken) / (1024 * 1024 * 1024)
 	overhead := 0.5 // buffers / compute workspace (GB)
 	return weightGB + kvGB + overhead
+}
+
+// EstimateVRAM keeps the legacy signature (f16 KV, mmproj on GPU) for callers
+// that do not have the full parameter context.
+func EstimateVRAM(spec ModelSpec, ngl int, ctx int, h *HardwareInfo) float64 {
+	return EstimateVRAMEx(spec, ngl, ctx, h, "f16", "f16", false)
 }
 
 // systemRAMMB returns total physical RAM in MB (Windows only).

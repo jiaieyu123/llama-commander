@@ -22,11 +22,11 @@ import (
 type SourceType string
 
 const (
-	SourceLocal   SourceType = "local"
-	SourceHF      SourceType = "huggingface"
-	SourceURL     SourceType = "url"
-	SourceDocker  SourceType = "docker"
-	SourceCache   SourceType = "cache"
+	SourceLocal  SourceType = "local"
+	SourceHF     SourceType = "huggingface"
+	SourceURL    SourceType = "url"
+	SourceDocker SourceType = "docker"
+	SourceCache  SourceType = "cache"
 )
 
 // SourceRef describes a remote source.
@@ -98,15 +98,15 @@ type TestConfig struct {
 
 // TestConfigMeta records how well the configuration scored when tested.
 type TestConfigMeta struct {
-	Mode        string  `json:"mode,omitempty"` // exhaustive | greedy
-	TPS         float64 `json:"tps,omitempty"`
-	LoadMS      int64   `json:"load_ms,omitempty"`
-	Tokens      int     `json:"tokens,omitempty"`
-	CtxSize     int     `json:"ctx_size,omitempty"`
-	NGPULayers  int     `json:"n_gpu_layers,omitempty"`
-	MaxTokens   int     `json:"max_tokens,omitempty"`
-	Prompt      string  `json:"prompt,omitempty"`
-	Date        string  `json:"date,omitempty"`
+	Mode       string  `json:"mode,omitempty"` // exhaustive | greedy
+	TPS        float64 `json:"tps,omitempty"`
+	LoadMS     int64   `json:"load_ms,omitempty"`
+	Tokens     int     `json:"tokens,omitempty"`
+	CtxSize    int     `json:"ctx_size,omitempty"`
+	NGPULayers int     `json:"n_gpu_layers,omitempty"`
+	MaxTokens  int     `json:"max_tokens,omitempty"`
+	Prompt     string  `json:"prompt,omitempty"`
+	Date       string  `json:"date,omitempty"`
 }
 
 // DefaultParams is the Level-2 (model specific) configuration.
@@ -133,8 +133,8 @@ type Bundle struct {
 	LORAList      []LoRA        `json:"lora_list"`
 	MCPServers    []string      `json:"mcp_servers"`
 	DefaultParams DefaultParams `json:"default_params"`
-	TestConfigs  []TestConfig  `json:"test_configs,omitempty"`
-	UsageStats   UsageStats    `json:"usage_stats"`
+	TestConfigs   []TestConfig  `json:"test_configs,omitempty"`
+	UsageStats    UsageStats    `json:"usage_stats"`
 	Tags          []string      `json:"tags"`
 	LastUsed      string        `json:"last_used,omitempty"`
 	CreatedAt     string        `json:"created_at"`
@@ -144,8 +144,8 @@ type Bundle struct {
 // Manager is the thread-safe CRUD store for bundles.
 type Manager struct {
 	path    string
-	mu      sync.RWMutex  // guards in-memory map
-	saveMu  sync.Mutex    // serializes disk writes (avoid .tmp collisions)
+	mu      sync.RWMutex // guards in-memory map
+	saveMu  sync.Mutex   // serializes disk writes (avoid .tmp collisions)
 	bundles map[string]*Bundle
 }
 
@@ -162,10 +162,10 @@ func NewManager(path string) (*Manager, error) {
 // empty store instead of failing.
 func (m *Manager) Load() error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.bundles = make(map[string]*Bundle)
 	data, err := os.ReadFile(m.path)
 	if err != nil {
+		m.mu.Unlock()
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
@@ -173,16 +173,91 @@ func (m *Manager) Load() error {
 	}
 	var list []*Bundle
 	if err := json.Unmarshal(data, &list); err != nil {
+		m.mu.Unlock()
 		return fmt.Errorf("bundles.json: %w", err)
 	}
+	oldFormat := false
 	for _, b := range list {
+		if pruneRawMetadata(b) {
+			oldFormat = true
+		}
 		m.bundles[b.ID] = b
+	}
+	m.mu.Unlock()
+	// One-shot migration: an old file that still embeds the full metadata maps
+	// was just slimmed in memory — rewrite it now so disk usage and future
+	// loads stay small. Runs outside the write lock (Save takes its own locks).
+	if oldFormat {
+		return m.Save()
 	}
 	return nil
 }
 
+// mtpProbeCache caches file→hasMTP probe results by path so repeated lookups
+// (per launch, per API listing) don't re-parse the GGUF header every time.
+var mtpProbeCache sync.Map // path -> bool
+
+// HasMTPHeadByFile probes a GGUF file for an MTP head using its tensor names
+// (blk.*.nextn.*). Results are cached; model files are treated as immutable
+// after import.
+func HasMTPHeadByFile(path string) bool {
+	if path == "" {
+		return false
+	}
+	if v, ok := mtpProbeCache.Load(path); ok {
+		return v.(bool)
+	}
+	has := false
+	if info, err := gguf.Parse(path); err == nil {
+		has = info.HasMTPHead()
+	}
+	mtpProbeCache.Store(path, has)
+	return has
+}
+
+// slimCopy returns a shallow copy of b whose raw GGUF metadata maps are
+// dropped. The full metadata map (containing the tokenizer vocab — tens of MB
+// for a 150k-token model) is only needed transiently during parsing; persisting
+// it bloated bundles.json to 300+ MB. The typed fields survive, so the UI and
+// the config engine keep working unchanged.
+func slimCopy(b *Bundle) *Bundle {
+	cp := *b
+	if b.BaseModel.Metadata != nil {
+		pm := *b.BaseModel.Metadata
+		pm.Metadata = nil
+		cp.BaseModel.Metadata = &pm
+	}
+	if b.MMProj.Metadata != nil {
+		pm := *b.MMProj.Metadata
+		pm.Metadata = nil
+		cp.MMProj.Metadata = &pm
+	}
+	return &cp
+}
+
+// pruneRawMetadata drops the raw metadata maps in place. It is applied after
+// Load so old on-disk data stops holding huge maps in memory. Returns true
+// when anything was pruned (i.e. the file was old-format and should be
+// rewritten once by the caller).
+func pruneRawMetadata(b *Bundle) bool {
+	changed := false
+	if b.BaseModel.Metadata != nil && b.BaseModel.Metadata.Metadata != nil {
+		b.BaseModel.Metadata.Metadata = nil
+		changed = true
+	}
+	if b.MMProj.Metadata != nil && b.MMProj.Metadata.Metadata != nil {
+		b.MMProj.Metadata.Metadata = nil
+		changed = true
+	}
+	return changed
+}
+
 // Save writes the store to disk atomically. A dedicated saveMu serializes
 // concurrent writers (batch imports) so the .tmp file never collides.
+//
+// Raw GGUF metadata maps (tokenizer vocab etc., tens of MB per model) are
+// dropped from the serialized copy: they are only needed transiently during
+// parsing, and persisting them bloated bundles.json to 300+ MB.
 func (m *Manager) Save() error {
 	m.saveMu.Lock()
 	defer m.saveMu.Unlock()
@@ -190,7 +265,7 @@ func (m *Manager) Save() error {
 	m.mu.RLock()
 	list := make([]*Bundle, 0, len(m.bundles))
 	for _, b := range m.bundles {
-		list = append(list, b)
+		list = append(list, slimCopy(b))
 	}
 	m.mu.RUnlock()
 	sort.Slice(list, func(i, j int) bool { return list[i].Name < list[j].Name })
@@ -292,6 +367,11 @@ func (m *Manager) AddTestConfig(id string, tc TestConfig) (TestConfig, error) {
 		tc.Meta.Date = tc.CreatedAt
 	}
 	b.TestConfigs = append(b.TestConfigs, tc)
+	// Cap the per-model history so saved best-configs can't grow without bound.
+	const maxTestConfigs = 30
+	if len(b.TestConfigs) > maxTestConfigs {
+		b.TestConfigs = append([]TestConfig(nil), b.TestConfigs[len(b.TestConfigs)-maxTestConfigs:]...)
+	}
 	m.mu.Unlock()
 	return tc, m.Save()
 }
@@ -332,8 +412,8 @@ func (m *Manager) AddFromGGUF(path, name string, parseMetadata bool) (*Bundle, e
 // defaultParamsFrom derives sensible defaults from GGUF metadata.
 func defaultParamsFrom(info *gguf.ModelInfo) DefaultParams {
 	dp := DefaultParams{
-		LoadMode: "mmap",
-		Samplers: "penalties;dry;top_k;top_p;min_p;temperature",
+		LoadMode:  "mmap",
+		Samplers:  "penalties;dry;top_k;top_p;min_p;temperature",
 		FlashAttn: "on",
 	}
 	if info != nil {
@@ -345,18 +425,38 @@ func defaultParamsFrom(info *gguf.ModelInfo) DefaultParams {
 	return dp
 }
 
-// detectTags guesses tags from metadata/file name.
+// detectTags guesses tags from metadata/file name so the UI can surface the
+// model's capabilities (vision / MoE / reasoning / embedding / MTP head).
 func detectTags(info *gguf.ModelInfo, name string) []string {
 	var tags []string
 	if info != nil {
-		if strings.Contains(info.Architecture, "clip") ||
-			strings.Contains(info.Architecture, "vision") {
+		arch := strings.ToLower(info.Architecture)
+		if strings.Contains(arch, "clip") || strings.Contains(arch, "vision") {
 			tags = append(tags, "vision")
+		}
+		if info.IsMoE() {
+			tags = append(tags, "moe")
+		}
+		if strings.Contains(arch, "bert") || strings.Contains(arch, "bge") ||
+			strings.Contains(arch, "gte") || strings.Contains(arch, "embed") {
+			tags = append(tags, "embedding")
 		}
 		tags = append(tags, info.Architecture)
 	}
-	if strings.Contains(strings.ToLower(name), "mtp") {
+	lower := strings.ToLower(name)
+	// MTP head: from file name/path OR the header tensor table, so models whose
+	// name doesn't advertise MTP but embed a blk.*.nextn.* head are tagged too.
+	if (info != nil && info.HasMTPHead()) ||
+		strings.Contains(lower, "mtp") || strings.Contains(lower, "nextn") {
 		tags = append(tags, "mtp")
+	}
+	// Reasoning/thinking models (e.g. DeepSeek-R1, Qwen3-thinking variants).
+	if strings.Contains(lower, "r1") || strings.Contains(lower, "reasoning") ||
+		strings.Contains(lower, "thinking") || strings.Contains(lower, "reflect") {
+		tags = append(tags, "reasoning")
+	}
+	if strings.Contains(lower, "embed") || strings.Contains(lower, "bge") || strings.Contains(lower, "gte") {
+		tags = append(tags, "embedding")
 	}
 	return tags
 }

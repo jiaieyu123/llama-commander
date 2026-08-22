@@ -25,12 +25,12 @@ func CachePath() string {
 
 // CacheEntry mirrors a single cache entry's manifest.json.
 type Entry struct {
-	RepoID      string `json:"repo_id"`
-	Filename    string `json:"filename"`
-	Path        string `json:"path"`
-	SizeMB      float64 `json:"size_mb"`
-	ETag        string `json:"etag"`
-	Downloaded  string `json:"downloaded,omitempty"`
+	RepoID     string  `json:"repo_id"`
+	Filename   string  `json:"filename"`
+	Path       string  `json:"path"`
+	SizeMB     float64 `json:"size_mb"`
+	ETag       string  `json:"etag"`
+	Downloaded string  `json:"downloaded,omitempty"`
 }
 
 // CacheManager provides read-only browsing + delete/import/export helpers.

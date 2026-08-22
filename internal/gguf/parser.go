@@ -49,11 +49,13 @@ type ModelInfo struct {
 	HeadCountKV     uint64         `json:"head_count_kv"`
 	EmbeddingLength uint64         `json:"embedding_length"`
 	VocabSize       uint64         `json:"vocab_size"`
+	NumExperts      uint64         `json:"expert_count,omitempty"`
 	FileType        uint32         `json:"file_type"`
 	FileTypeName    string         `json:"file_type_name"`
 	Moe             bool           `json:"is_moe"`
 	Metadata        map[string]any `json:"metadata"`
 	RawKeys         []string       `json:"-"`
+	TensorNames     []string       `json:"-"` // header tensor names (MTP detection)
 }
 
 // Parse opens the GGUF file at path and parses its header.
@@ -84,7 +86,8 @@ func ParseReader(r io.ReaderAt, size int64, path string) (*ModelInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := g.u64(); err != nil { // tensor count, unused
+	tensorCount, err := g.u64()
+	if err != nil {
 		return nil, err
 	}
 	kvCount, err := g.u64()
@@ -114,6 +117,37 @@ func ParseReader(r io.ReaderAt, size int64, path string) (*ModelInfo, error) {
 		info.Metadata[key] = val
 		info.RawKeys = append(info.RawKeys, key)
 	}
+	// Tensor metadata table: read tensor names (skip dims/type/offset). Names
+	// are used to detect MTP (multi-token-prediction) heads — llama.cpp names
+	// them "blk.<n>.nextn.*", which is exactly what shows up as "unused tensor"
+	// when speculative decoding is not enabled.
+	if tensorCount > 1<<20 {
+		return nil, fmt.Errorf("gguf: implausible tensor count %d", tensorCount)
+	}
+	info.TensorNames = make([]string, 0, tensorCount)
+	for i := uint64(0); i < tensorCount; i++ {
+		name, err := g.str()
+		if err != nil {
+			return nil, err
+		}
+		info.TensorNames = append(info.TensorNames, name)
+		nDims, err := g.u32()
+		if err != nil {
+			return nil, err
+		}
+		if uint64(nDims) > 1<<20 {
+			return nil, fmt.Errorf("gguf: implausible tensor dims %d", nDims)
+		}
+		if err := g.skip(int(nDims) * 8); err != nil {
+			return nil, err
+		}
+		if _, err := g.u32(); err != nil { // tensor type
+			return nil, err
+		}
+		if _, err := g.u64(); err != nil { // data offset
+			return nil, err
+		}
+	}
 	info.extractKnownFields()
 	return info, nil
 }
@@ -140,8 +174,11 @@ func (m *ModelInfo) extractKnownFields() {
 	if _, v := findBySuffix(m.Metadata, ".vocab_size"); v != nil {
 		m.VocabSize = ui64(v)
 	}
+	if _, v := findBySuffix(m.Metadata, ".expert_count"); v != nil {
+		m.NumExperts = ui64(v)
+	}
 	m.FileTypeName = FileTypeName(m.FileType)
-	m.Moe = m.ExpertCount() > 0
+	m.Moe = m.NumExperts > 0
 }
 
 // ---- low-level reader ----
@@ -228,6 +265,20 @@ func (g *ggufReader) f64() (float64, error) {
 		return 0, err
 	}
 	return math.Float64frombits(binary.LittleEndian.Uint64(b)), nil
+}
+
+// skip advances the reader n bytes without retaining them (used to jump over
+// tensor dims etc. in the header).
+func (g *ggufReader) skip(n int) error {
+	if n == 0 {
+		return nil
+	}
+	if int64(n) > g.rem {
+		return io.ErrUnexpectedEOF
+	}
+	g.rem -= int64(n)
+	_, err := g.br.Discard(n)
+	return err
 }
 
 // str reads a GGUF string (uint64 length prefix + bytes).
@@ -426,11 +477,37 @@ func (m *ModelInfo) Filename() string {
 	return filepath.Base(m.Path)
 }
 
+// HasMTPHead reports whether any tensor belongs to a multi-token-prediction
+// (MTP) head. llama.cpp names those "blk.<n>.nextn.*"; some builders use a
+// literal "mtp" prefix. Detected from the header tensor table, independent of
+// the file name — so models like "Qwen3.8-27B-UD-IQ2_XXS.gguf" that embed an
+// MTP head but don't advertise it are still recognized.
+func (m *ModelInfo) HasMTPHead() bool {
+	if m == nil {
+		return false
+	}
+	for _, n := range m.TensorNames {
+		low := strings.ToLower(n)
+		if strings.Contains(low, ".nextn.") || strings.HasPrefix(low, "nextn") ||
+			strings.Contains(low, ".mtp.") || strings.HasPrefix(low, "mtp.") {
+			return true
+		}
+	}
+	return false
+}
+
 // ExpertCount returns the number of experts in a MoE model (0 if not MoE).
+// The value is extracted into the typed field during parsing and survives
+// metadata pruning — the raw metadata map is dropped at persistence time to
+// keep bundles.json small (a 150k-token vocab alone is tens of MB per model).
 func (m *ModelInfo) ExpertCount() uint64 {
 	if m == nil {
 		return 0
 	}
+	if m.NumExperts > 0 {
+		return m.NumExperts
+	}
+	// Fallback: raw metadata, available only right after a fresh parse.
 	if _, v := findBySuffix(m.Metadata, ".expert_count"); v != nil {
 		return ui64(v)
 	}
@@ -439,5 +516,5 @@ func (m *ModelInfo) ExpertCount() uint64 {
 
 // IsMoE reports whether the model uses a Mixture-of-Experts architecture.
 func (m *ModelInfo) IsMoE() bool {
-	return m != nil && m.ExpertCount() > 0
+	return m != nil && (m.Moe || m.ExpertCount() > 0)
 }

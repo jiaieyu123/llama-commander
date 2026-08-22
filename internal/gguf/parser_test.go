@@ -15,8 +15,8 @@ func buildGGUF(t *testing.T, meta map[string]any) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	buf.Write(magic[:])
-	writeU32(&buf, 3)        // version
-	writeU64(&buf, 0)        // tensor count
+	writeU32(&buf, 3) // version
+	writeU64(&buf, 0) // tensor count
 	writeU64(&buf, uint64(len(meta)))
 	for k, v := range meta {
 		writeString(&buf, k)
@@ -99,13 +99,13 @@ func TestStringArray(t *testing.T) {
 
 func TestParseReader(t *testing.T) {
 	meta := map[string]any{
-		"general.architecture":  "llama",
-		"llama.context_length":  uint64(4096),
-		"llama.block_count":     uint64(60),
-		"llama.head_count":      uint64(64),
-		"llama.head_count_kv":   uint64(8),
+		"general.architecture":   "llama",
+		"llama.context_length":   uint64(4096),
+		"llama.block_count":      uint64(60),
+		"llama.head_count":       uint64(64),
+		"llama.head_count_kv":    uint64(8),
 		"llama.embedding_length": uint64(8192),
-		"general.file_type":     uint32(17), // Q4_K_M
+		"general.file_type":      uint32(17), // Q4_K_M
 	}
 	data := buildGGUF(t, meta)
 
@@ -196,5 +196,62 @@ func TestLargeMetadata(t *testing.T) {
 	}
 	if info.Architecture != "llama" || info.ContextLength != 8192 || info.BlockCount != 32 {
 		t.Errorf("known fields lost: arch=%q ctx=%d blocks=%d", info.Architecture, info.ContextLength, info.BlockCount)
+	}
+}
+
+// buildGGUFWithTensors is like buildGGUF but also appends a tensor metadata
+// table with the given names (each with dims=[1], type=F32, offset=0).
+func buildGGUFWithTensors(t *testing.T, meta map[string]any, tensors []string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	buf.Write(magic[:])
+	writeU32(&buf, 3) // version
+	writeU64(&buf, uint64(len(tensors)))
+	writeU64(&buf, uint64(len(meta)))
+	for k, v := range meta {
+		writeString(&buf, k)
+		writeTyped(&buf, v)
+	}
+	for _, name := range tensors {
+		writeString(&buf, name)
+		writeU32(&buf, 1) // n_dims
+		writeU64(&buf, 4) // dim[0]
+		writeU32(&buf, 0) // type F32
+		writeU64(&buf, 0) // data offset
+	}
+	return buf.Bytes()
+}
+
+// TestHasMTPHead verifies MTP heads are detected from the header tensor table
+// (blk.*.nextn.* / mtp.*), independent of the file name — the case where a
+// model like "Qwen3.8-27B-UD-IQ2_XXS.gguf" embeds an MTP head without saying so.
+func TestHasMTPHead(t *testing.T) {
+	dir := t.TempDir()
+	mustParse := func(name string, tensors []string) *ModelInfo {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, buildGGUFWithTensors(t, map[string]any{
+			"general.architecture": "qwen35",
+		}, tensors), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		info, err := Parse(p)
+		if err != nil {
+			t.Fatalf("Parse(%s): %v", name, err)
+		}
+		return info
+	}
+
+	if info := mustParse("mystery.gguf", []string{"blk.65.nextn.attn_q.weight"}); !info.HasMTPHead() {
+		t.Error("blk.*.nextn.* tensor should be detected as MTP head")
+	}
+	if info := mustParse("mystery.gguf", []string{"mtp.proj.weight"}); !info.HasMTPHead() {
+		t.Error("mtp.* tensor should be detected as MTP head")
+	}
+	if info := mustParse("mystery.gguf", []string{"blk.0.attn_q.weight", "blk.1.attn_k.weight"}); info.HasMTPHead() {
+		t.Error("plain tensors should not be flagged as MTP")
+	}
+	if info := mustParse("mystery.gguf", []string{"output.weight"}); info.HasMTPHead() {
+		t.Error("output.weight should not be flagged as MTP")
 	}
 }

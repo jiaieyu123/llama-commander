@@ -11,15 +11,15 @@ package config
 type ParamKind string
 
 const (
-	KindInt     ParamKind = "int"     // integer with optional min/max
-	KindFloat   ParamKind = "float"   // float with optional min/max
-	KindBool    ParamKind = "bool"    // flag only, no value
-	KindString  ParamKind = "string"  // free text
-	KindEnum    ParamKind = "enum"    // dropdown
-	KindMulti   ParamKind = "multi"   // multi-select
-	KindRange   ParamKind = "range"   // "lo-hi" style string
-	KindSecret  ParamKind = "secret"  // password field
-	KindFile    ParamKind = "file"    // file picker
+	KindInt    ParamKind = "int"    // integer with optional min/max
+	KindFloat  ParamKind = "float"  // float with optional min/max
+	KindBool   ParamKind = "bool"   // flag only, no value
+	KindString ParamKind = "string" // free text
+	KindEnum   ParamKind = "enum"   // dropdown
+	KindMulti  ParamKind = "multi"  // multi-select
+	KindRange  ParamKind = "range"  // "lo-hi" style string
+	KindSecret ParamKind = "secret" // password field
+	KindFile   ParamKind = "file"   // file picker
 )
 
 // ParamGroup is a UI grouping for the parameter matrix.
@@ -40,17 +40,17 @@ const (
 
 // ParamDef describes a single parameter.
 type ParamDef struct {
-	Key          string     // canonical key, e.g. "n_gpu_layers"
-	Flag         string     // short flag, e.g. "-ngl" ("" if none)
-	LongFlag     string     // long flag, e.g. "--n-gpu-layers"
-	Kind         ParamKind  // control kind
-	Group        ParamGroup // UI group
-	Label        string     // Chinese label for the UI
-	Default      any        // default value
-	Enum         []string   // choices for KindEnum / KindMulti
-	Min, Max     float64    // bounds for numeric kinds
-	RequiresValue bool      // false => boolean style flag without "=value"
-	AlwaysEmit   bool       // true => always emit even when default
+	Key           string     // canonical key, e.g. "n_gpu_layers"
+	Flag          string     // short flag, e.g. "-ngl" ("" if none)
+	LongFlag      string     // long flag, e.g. "--n-gpu-layers"
+	Kind          ParamKind  // control kind
+	Group         ParamGroup // UI group
+	Label         string     // Chinese label for the UI
+	Default       any        // default value
+	Enum          []string   // choices for KindEnum / KindMulti
+	Min, Max      float64    // bounds for numeric kinds
+	RequiresValue bool       // false => boolean style flag without "=value"
+	AlwaysEmit    bool       // true => always emit even when default
 }
 
 // Registry holds all known parameters.
@@ -167,6 +167,7 @@ var paramMatrix = []ParamDef{
 	{Key: "yarn_beta_slow", LongFlag: "--yarn-beta-slow", Kind: KindFloat, Group: GroupPerf, Label: "YaRN 慢端校正", Default: -1.0, RequiresValue: true},
 	{Key: "mmproj_url", LongFlag: "--mmproj-url", Flag: "-mmu", Kind: KindString, Group: GroupPerf, Label: "mmproj 下载 URL", Default: "", RequiresValue: true},
 	{Key: "mmproj_device", LongFlag: "--mmproj-device", Flag: "-mmdev", Kind: KindString, Group: GroupPerf, Label: "mmproj 设备", Default: "", RequiresValue: true},
+	{Key: "no_mmproj_offload", LongFlag: "--no-mmproj-offload", Kind: KindBool, Group: GroupPerf, Label: "mmproj 走 CPU", Default: false},
 	{Key: "image_min_tokens", LongFlag: "--image-min-tokens", Kind: KindInt, Group: GroupPerf, Label: "图像最小 token", Default: 0, Min: 0, RequiresValue: true},
 	{Key: "image_max_tokens", LongFlag: "--image-max-tokens", Kind: KindInt, Group: GroupPerf, Label: "图像最大 token", Default: 0, Min: 0, RequiresValue: true},
 	{Key: "mtmd_batch_max_tokens", LongFlag: "--mtmd-batch-max-tokens", Kind: KindInt, Group: GroupPerf, Label: "多模态批最大 token", Default: 1024, Min: 0, RequiresValue: true},
@@ -174,6 +175,9 @@ var paramMatrix = []ParamDef{
 	{Key: "pooling", LongFlag: "--pooling", Kind: KindEnum, Group: GroupPerf, Label: "嵌入池化", Default: "", Enum: []string{"", "none", "mean", "cls", "last", "rank"}, RequiresValue: true},
 	{Key: "embd_normalize", LongFlag: "--embd-normalize", Kind: KindInt, Group: GroupPerf, Label: "嵌入归一化", Default: 2, Min: -1, RequiresValue: true},
 	{Key: "rerank", LongFlag: "--rerank", Kind: KindBool, Group: GroupPerf, Label: "重排模式", Default: false},
+	{Key: "embd_output_format", LongFlag: "--embd-output-format", Kind: KindEnum, Group: GroupPerf, Label: "嵌入输出格式", Default: "", Enum: []string{"", "array", "json", "json+", "raw"}, RequiresValue: true},
+	{Key: "embd_separator", LongFlag: "--embd-separator", Kind: KindString, Group: GroupPerf, Label: "嵌入分隔符", Default: "", RequiresValue: true},
+	{Key: "cls_separator", LongFlag: "--cls-separator", Kind: KindString, Group: GroupPerf, Label: "分类序列分隔符", Default: "", RequiresValue: true},
 
 	// ── 🧠 内存与加载 ───────────────────────────────────────────
 	{Key: "load_mode", LongFlag: "--load-mode", Kind: KindEnum, Group: GroupMemory, Label: "加载模式", Default: "mmap", Enum: []string{"none", "mmap", "mlock", "mmap+mlock", "dio"}, RequiresValue: true},
@@ -208,7 +212,9 @@ var paramMatrix = []ParamDef{
 	{Key: "poll_batch", LongFlag: "--poll-batch", Kind: KindInt, Group: GroupCPU, Label: "批阶段轮询", Default: 50, Min: 0, Max: 100, RequiresValue: true},
 
 	// ── 🎨 生成控制 ─────────────────────────────────────────────
-	{Key: "samplers", LongFlag: "--samplers", Kind: KindString, Group: GroupSample, Label: "采样器链", Default: "penalties;dry;top_k;top_p;min_p;temperature", RequiresValue: true},
+	{Key: "samplers", LongFlag: "--samplers", Kind: KindString, Group: GroupSample, Label: "采样器链", Default: "penalties;dry;top_n_sigma;top_k;typ_p;top_p;min_p;xtc;temperature", RequiresValue: true},
+	{Key: "sampler_seq", LongFlag: "--sampler-seq", Kind: KindString, Group: GroupSample, Label: "简化采样序列", Default: "", RequiresValue: true},
+	{Key: "ignore_eos", LongFlag: "--ignore-eos", Kind: KindBool, Group: GroupSample, Label: "忽略 EOS 继续生成", Default: false},
 	{Key: "temperature", LongFlag: "--temperature", Flag: "--temp", Kind: KindFloat, Group: GroupSample, Label: "温度", Default: 0.80, Min: 0, Max: 2, RequiresValue: true},
 	{Key: "top_k", LongFlag: "--top-k", Kind: KindInt, Group: GroupSample, Label: "Top-K", Default: 40, Min: 0, Max: 100000, RequiresValue: true},
 	{Key: "top_p", LongFlag: "--top-p", Kind: KindFloat, Group: GroupSample, Label: "Top-P", Default: 0.95, Min: 0, Max: 1, RequiresValue: true},
@@ -247,6 +253,10 @@ var paramMatrix = []ParamDef{
 	{Key: "spec_draft_threads", LongFlag: "--spec-draft-threads", Kind: KindInt, Group: GroupSpec, Label: "草稿线程数", Default: 0, Min: 0, RequiresValue: true},
 	{Key: "spec_draft_cpu_mask", LongFlag: "--spec-draft-cpu-mask", Kind: KindString, Group: GroupSpec, Label: "草稿 CPU 掩码", Default: "", RequiresValue: true},
 	{Key: "spec_draft_prio", LongFlag: "--spec-draft-prio", Kind: KindInt, Group: GroupSpec, Label: "草稿优先级", Default: 0, Min: -1, Max: 3, RequiresValue: true},
+	{Key: "spec_draft_poll", LongFlag: "--spec-draft-poll", Kind: KindInt, Group: GroupSpec, Label: "草稿轮询", Default: 0, Min: 0, Max: 1, RequiresValue: true},
+	{Key: "spec_draft_cpu_mask_batch", LongFlag: "--spec-draft-cpu-mask-batch", Kind: KindString, Group: GroupSpec, Label: "草稿批掩码", Default: "", RequiresValue: true},
+	{Key: "spec_draft_prio_batch", LongFlag: "--spec-draft-prio-batch", Kind: KindInt, Group: GroupSpec, Label: "草稿批优先级", Default: 0, Min: -1, Max: 3, RequiresValue: true},
+	{Key: "spec_draft_poll_batch", LongFlag: "--spec-draft-poll-batch", Kind: KindInt, Group: GroupSpec, Label: "草稿批轮询", Default: 0, Min: 0, Max: 1, RequiresValue: true},
 	{Key: "spec_draft_device", LongFlag: "--spec-draft-device", Kind: KindMulti, Group: GroupSpec, Label: "草稿设备", Default: nil, RequiresValue: true},
 	{Key: "spec_draft_cache_type_k", LongFlag: "--spec-draft-cache-type-k", Kind: KindEnum, Group: GroupSpec, Label: "草稿 K 缓存", Default: "f16", Enum: []string{"f32", "f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"}, RequiresValue: true},
 	{Key: "spec_draft_cache_type_v", LongFlag: "--spec-draft-cache-type-v", Kind: KindEnum, Group: GroupSpec, Label: "草稿 V 缓存", Default: "f16", Enum: []string{"f32", "f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"}, RequiresValue: true},
@@ -258,6 +268,8 @@ var paramMatrix = []ParamDef{
 	{Key: "spec_ngram_mod_n_max", LongFlag: "--spec-ngram-mod-n-max", Kind: KindInt, Group: GroupSpec, Label: "ngram-mod n 最大", Default: 4, Min: 0, RequiresValue: true},
 	{Key: "spec_ngram_simple_size_n", LongFlag: "--spec-ngram-simple-size-n", Kind: KindInt, Group: GroupSpec, Label: "ngram-simple n", Default: 4, Min: 0, RequiresValue: true},
 	{Key: "spec_ngram_simple_size_m", LongFlag: "--spec-ngram-simple-size-m", Kind: KindInt, Group: GroupSpec, Label: "ngram-simple m", Default: 4, Min: 0, RequiresValue: true},
+	{Key: "lookup_cache_static", LongFlag: "--lookup-cache-static", Flag: "-lcs", Kind: KindFile, Group: GroupSpec, Label: "静态查找缓存", Default: "", RequiresValue: true},
+	{Key: "lookup_cache_dynamic", LongFlag: "--lookup-cache-dynamic", Flag: "-lcd", Kind: KindFile, Group: GroupSpec, Label: "动态查找缓存", Default: "", RequiresValue: true},
 	{Key: "spec_default", LongFlag: "--spec-default", Kind: KindBool, Group: GroupSpec, Label: "启用默认投机配置", Default: false},
 	{Key: "spec_draft_backend_sampling", LongFlag: "--spec-draft-backend-sampling", Kind: KindBool, Group: GroupSpec, Label: "草稿后端采样", Default: false},
 	{Key: "spec_draft_override_tensor", LongFlag: "--spec-draft-override-tensor", Flag: "-otd", Kind: KindString, Group: GroupSpec, Label: "草稿张量覆盖", Default: "", RequiresValue: true},
@@ -283,6 +295,7 @@ var paramMatrix = []ParamDef{
 	{Key: "offline", LongFlag: "--offline", Kind: KindBool, Group: GroupSource, Label: "强制使用缓存", Default: false},
 	{Key: "lora", LongFlag: "--lora", Kind: KindString, Group: GroupSource, Label: "LoRA 适配器", Default: "", RequiresValue: true},
 	{Key: "lora_init_without_apply", LongFlag: "--lora-init-without-apply", Kind: KindBool, Group: GroupSource, Label: "LoRA 仅加载不应用", Default: false},
+	{Key: "control_vector_scaled", LongFlag: "--control-vector-scaled", Kind: KindString, Group: GroupSource, Label: "控制向量(带缩放)", Default: "", RequiresValue: true},
 	{Key: "override_tensor", LongFlag: "--override-tensor", Flag: "-ot", Kind: KindString, Group: GroupSource, Label: "张量缓冲覆盖", Default: "", RequiresValue: true},
 	{Key: "override_kv", LongFlag: "--override-kv", Kind: KindString, Group: GroupSource, Label: "元数据 KV 覆盖", Default: "", RequiresValue: true},
 	{Key: "models_dir", LongFlag: "--models-dir", Kind: KindString, Group: GroupSource, Label: "多模型目录", Default: "", RequiresValue: true},
@@ -295,7 +308,7 @@ var paramMatrix = []ParamDef{
 	{Key: "ssl_cert_file", LongFlag: "--ssl-cert-file", Kind: KindFile, Group: GroupNetwork, Label: "SSL 证书", Default: "", RequiresValue: true},
 	{Key: "cors_origins", LongFlag: "--cors-origins", Kind: KindString, Group: GroupNetwork, Label: "CORS 来源", Default: "", RequiresValue: true},
 	{Key: "cors_methods", LongFlag: "--cors-methods", Kind: KindString, Group: GroupNetwork, Label: "CORS 方法", Default: "", RequiresValue: true},
-	{Key: "timeout", LongFlag: "--timeout", Kind: KindInt, Group: GroupNetwork, Label: "读写超时(秒)", Default: 600, Min: 0, RequiresValue: true},
+	{Key: "timeout", LongFlag: "--timeout", Kind: KindInt, Group: GroupNetwork, Label: "读写超时(秒)", Default: 3600, Min: 0, RequiresValue: true},
 	{Key: "threads_http", LongFlag: "--threads-http", Kind: KindInt, Group: GroupNetwork, Label: "HTTP 线程数", Default: -1, Min: -1, Max: 1024, RequiresValue: true},
 	{Key: "metrics", LongFlag: "--metrics", Kind: KindBool, Group: GroupNetwork, Label: "Prometheus 指标端点", Default: false},
 	{Key: "props", LongFlag: "--props", Kind: KindBool, Group: GroupNetwork, Label: "运行时改参数", Default: false},
@@ -305,12 +318,14 @@ var paramMatrix = []ParamDef{
 	{Key: "cors_headers", LongFlag: "--cors-headers", Kind: KindString, Group: GroupNetwork, Label: "CORS 允许头", Default: "*", RequiresValue: true},
 	{Key: "cors_credentials", LongFlag: "--cors-credentials", Kind: KindBool, Group: GroupNetwork, Label: "CORS 携带凭据", Default: false},
 	{Key: "no_webui", LongFlag: "--no-webui", Kind: KindBool, Group: GroupNetwork, Label: "禁用内置 Web UI", Default: false},
+	{Key: "ui_config", LongFlag: "--ui-config", Kind: KindString, Group: GroupNetwork, Label: "UI 默认配置 JSON", Default: "", RequiresValue: true},
+	{Key: "slots", LongFlag: "--slots", Kind: KindBool, Group: GroupNetwork, Label: "槽位监控端点", Default: false},
 	{Key: "path", LongFlag: "--path", Kind: KindString, Group: GroupNetwork, Label: "静态文件目录", Default: "", RequiresValue: true},
 	{Key: "media_path", LongFlag: "--media-path", Kind: KindString, Group: GroupNetwork, Label: "媒体文件目录", Default: "", RequiresValue: true},
 	{Key: "alias", LongFlag: "--alias", Flag: "-a", Kind: KindString, Group: GroupNetwork, Label: "模型别名", Default: "", RequiresValue: true},
 	{Key: "tags", LongFlag: "--tags", Kind: KindString, Group: GroupNetwork, Label: "模型标签", Default: "", RequiresValue: true},
 	{Key: "tools", LongFlag: "--tools", Kind: KindString, Group: GroupNetwork, Label: "内置工具列表", Default: "", RequiresValue: true},
-	{Key: "tools_runtime", LongFlag: "--tools-runtime", Kind: KindEnum, Group: GroupNetwork, Label: "工具运行环境", Default: "", Enum: []string{"", "none", "docker", "podman", "ssh"}, RequiresValue: true},
+	{Key: "tools_runtime", LongFlag: "--tools-runtime", Kind: KindString, Group: GroupNetwork, Label: "工具运行环境", Default: "", RequiresValue: true},
 	{Key: "agent", LongFlag: "--agent", Kind: KindBool, Group: GroupNetwork, Label: "Agent 模式", Default: false},
 	{Key: "mcp_servers_config", LongFlag: "--mcp-servers-config", Kind: KindString, Group: GroupNetwork, Label: "MCP 配置 JSON 文件", Default: "", RequiresValue: true},
 	{Key: "mcp_servers_json", LongFlag: "--mcp-servers-json", Kind: KindString, Group: GroupNetwork, Label: "MCP 内联 JSON", Default: "", RequiresValue: true},
@@ -319,7 +334,7 @@ var paramMatrix = []ParamDef{
 
 	// ── 🧩 模板与推理 ───────────────────────────────────────────
 	{Key: "jinja", LongFlag: "--jinja", Kind: KindBool, Group: GroupChat, Label: "Jinja 模板引擎", Default: false},
-	{Key: "chat_template", LongFlag: "--chat-template", Kind: KindEnum, Group: GroupChat, Label: "对话模板", Default: "", Enum: []string{"", "llama2", "llama3", "qwen", "mistral", "vicuna", "chatml", "deepseek", "gemma"}, RequiresValue: true},
+	{Key: "chat_template", LongFlag: "--chat-template", Kind: KindString, Group: GroupChat, Label: "对话模板", Default: "", RequiresValue: true},
 	{Key: "chat_template_file", LongFlag: "--chat-template-file", Kind: KindFile, Group: GroupChat, Label: "模板文件", Default: "", RequiresValue: true},
 	{Key: "reasoning", LongFlag: "--reasoning", Flag: "-rea", Kind: KindEnum, Group: GroupChat, Label: "思维链控制", Default: "auto", Enum: []string{"on", "off", "auto"}, RequiresValue: true},
 	{Key: "reasoning_format", LongFlag: "--reasoning-format", Kind: KindEnum, Group: GroupChat, Label: "思维链格式", Default: "auto", Enum: []string{"auto", "thought", "deepseek", "qwen"}, RequiresValue: true},
@@ -333,8 +348,8 @@ var paramMatrix = []ParamDef{
 
 	// ── 📝 日志与调试 ───────────────────────────────────────────
 	{Key: "log_file", LongFlag: "--log-file", Kind: KindFile, Group: GroupLog, Label: "日志文件", Default: "", RequiresValue: true},
-	{Key: "log_colors", LongFlag: "--log-colors", Kind: KindBool, Group: GroupLog, Label: "彩色日志", Default: false},
-	{Key: "log_verbosity", LongFlag: "--log-verbosity", Kind: KindInt, Group: GroupLog, Label: "日志详细度", Default: 1, Min: 0, Max: 5, RequiresValue: true},
+	{Key: "log_colors", LongFlag: "--log-colors", Kind: KindEnum, Group: GroupLog, Label: "彩色日志", Default: "auto", Enum: []string{"", "auto", "on", "off"}, RequiresValue: true},
+	{Key: "log_verbosity", LongFlag: "--log-verbosity", Kind: KindInt, Group: GroupLog, Label: "日志详细度", Default: 3, Min: 0, Max: 5, RequiresValue: true},
 	{Key: "log_prefix", LongFlag: "--log-prefix", Kind: KindBool, Group: GroupLog, Label: "日志前缀", Default: false},
 	{Key: "log_timestamps", LongFlag: "--log-timestamps", Kind: KindBool, Group: GroupLog, Label: "日志时间戳", Default: false},
 	{Key: "log_disable", LongFlag: "--log-disable", Kind: KindBool, Group: GroupLog, Label: "禁用日志", Default: false},

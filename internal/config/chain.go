@@ -55,9 +55,9 @@ type ParamValue struct {
 
 // Chain resolves parameters by merging the three levels (higher wins).
 type Chain struct {
-	reg     *Registry
-	values  map[string]ParamValue
-	order   []string // insertion order for deterministic output
+	reg    *Registry
+	values map[string]ParamValue
+	order  []string // insertion order for deterministic output
 }
 
 // NewChain creates an empty chain.
@@ -77,8 +77,8 @@ func (c *Chain) Set(key string, val any, src SourceLevel) {
 func (c *Chain) Merge(global, model, session map[string]any) {
 	// order: global < model < session
 	layers := []struct {
-		m    map[string]any
-		lev  SourceLevel
+		m   map[string]any
+		lev SourceLevel
 	}{
 		{global, LevelGlobal},
 		{model, LevelModel},

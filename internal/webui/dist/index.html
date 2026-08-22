@@ -9,22 +9,62 @@
   <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand">🚀 Llama Commander <span class="badge-ver">v0.1-skeleton</span></div>
-    <div class="topbar-right">
-      <span class="inst-stat">实例: <b id="stat-running">0</b> 运行 / <b id="stat-stopped">0</b> 停止</span>
-      <button class="btn" id="btn-debug">🛠 API</button>
-      <button class="btn" id="btn-insights">📊 洞察</button>
-      <button class="btn" id="btn-mcp">🧩 MCP</button>
-      <button class="btn" id="btn-test" title="批量测试模型 / 参数扫描">🧪 测试</button>
-      <button class="btn" id="btn-library">📦 模型库</button>
-      <button class="btn" id="btn-settings">⚙️ 设置</button>
+  <!-- 左侧导航栏（SaaS 三栏式） -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-brand">
+      <span class="brand-logo">🚀</span>
+      <span class="sidebar-brand-name">Llama Commander</span>
+      <span class="badge-ver">v0.1-skeleton</span>
     </div>
-  </header>
+    <div class="sidebar-search">
+      <span class="ss-ic">🔍</span>
+      <input type="text" id="sidebar-search" placeholder="搜索模型…" autocomplete="off">
+    </div>
+    <div class="sidebar-sec-label">主菜单</div>
+    <nav class="main-tabs sidebar-nav" id="main-tabs">
+      <button class="main-tab active" data-mtab="setup"><span class="mt-ic">⚙️</span>模型配置</button>
+      <button class="main-tab" data-mtab="overview"><span class="mt-ic">📊</span>性能监控</button>
+      <button class="main-tab" data-mtab="instances"><span class="mt-ic">🚀</span>运行实例</button>
+      <button class="main-tab" data-mtab="console"><span class="mt-ic">📋</span>控制台</button>
+    </nav>
+    <div class="sidebar-sec-label">工具</div>
+    <div class="sidebar-tools">
+      <button class="btn side-tool" id="btn-library" title="模型库"><span class="st-ic">📦</span>模型库</button>
+      <button class="btn side-tool" id="btn-monitor" title="实时监控（输入/输出 token、速率、并发，含外部 API 调用）"><span class="st-ic">📡</span>监控</button>
+      <button class="btn side-tool" id="btn-test" title="批量测试模型 / 参数扫描"><span class="st-ic">🧪</span>测试</button>
+      <button class="btn side-tool" id="btn-insights" title="使用洞察"><span class="st-ic">📊</span>洞察</button>
+      <button class="btn side-tool" id="btn-mcp" title="工具扩展（MCP）"><span class="st-ic">🧩</span>MCP</button>
+      <button class="btn side-tool" id="btn-debug" title="API 调试"><span class="st-ic">🛠</span>API</button>
+      <button class="btn side-tool" id="btn-settings" title="全局设置"><span class="st-ic">⚙️</span>设置</button>
+    </div>
+    <div class="sidebar-promo">
+      <div class="sp-title">🚀 实例状态</div>
+      <div class="sp-sub">运行 <b id="stat-running">0</b> · 停止 <b id="stat-stopped">0</b></div>
+      <button class="btn primary sp-btn" id="btn-quick-start" title="前往模型配置并启动">▶ 快速启动</button>
+    </div>
+  </aside>
 
-  <main class="layout">
+  <div class="main-area">
+    <header class="topbar">
+      <div class="topbar-left">
+        <button class="btn small icon-btn" id="btn-sidebar-toggle" title="收起/展开侧边栏">☰</button>
+        <span class="topbar-crumb" id="topbar-crumb">⚙️ 模型配置</span>
+      </div>
+      <div class="topbar-right">
+        <span class="avatar-stack" title="本地用户">
+          <span class="avatar" style="background:linear-gradient(135deg,#6366f1,#8b5cf6)">🖥</span>
+          <span class="avatar" style="background:linear-gradient(135deg,#ec4899,#f43f5e)">🤖</span>
+          <span class="avatar" style="background:linear-gradient(135deg,#06b6d4,#3b82f6)">📦</span>
+        </span>
+        <button class="btn icon-btn" id="btn-notify" title="通知">🔔</button>
+        <button class="btn icon-btn" id="btn-top-refresh" title="刷新数据">🔄</button>
+      </div>
+    </header>
+
+    <main class="layout">
+
     <!-- 实例卡片区域 -->
-    <section class="panel" id="instances-panel">
+    <section class="panel" id="instances-panel" data-mtab="instances">
       <h2 class="panel-title">运行实例</h2>
       <div id="instances" class="instances-grid">
         <div class="empty-hint">暂无运行实例。请在下方选择模型并点击 ▶ 启动。</div>
@@ -32,7 +72,7 @@
     </section>
 
     <!-- 配置面板 -->
-    <section class="panel" id="config-panel">
+    <section class="panel" id="config-panel" data-mtab="setup">
       <h2 class="panel-title">配置</h2>
 
       <div class="cfg-row">
@@ -41,6 +81,18 @@
         <button class="btn small" id="btn-refresh-models" title="刷新模型库">🔄</button>
         <button class="btn small accent" id="btn-optimize" title="一键优化">✨ 一键优化</button>
         <button class="btn small" id="btn-params-help" title="查看全部参数说明与调整方法">📖 参数说明</button>
+      </div>
+      <div class="cfg-row">
+        <label>场景</label>
+        <select id="scenario-preset" title="一键应用常见使用场景的最佳参数组合">
+          <option value="">— 选择场景预设 —</option>
+          <option value="chat">💬 对话聊天（默认）</option>
+          <option value="code">💻 代码生成</option>
+          <option value="doc">📄 长文档摘要</option>
+          <option value="vram">💾 省显存模式</option>
+          <option value="fast">🚀 高速模式</option>
+        </select>
+        <button class="btn small" id="btn-scenario-clear" title="清空场景预设参数">🧹 还原</button>
       </div>
       <div class="cfg-meta" id="bundle-meta">📷 视觉: — | ⚡ 草稿: 未启用 | 🏷️ 标签: —</div>
       <div class="cfg-row" id="cfg-row-configs" hidden>
@@ -57,6 +109,8 @@
           <div class="field"><label>上下文</label><span class="num-wrap"><input type="number" id="p-ctx_size" value="4096" step="256"><select class="preset" data-target="p-ctx_size"><option value="">▾ 预设</option><option value="2048">2048 短对话</option><option value="4096">4096 标准</option><option value="8192">8192 长对话</option><option value="16384">16384 长文档</option><option value="32768">32768 超长</option><option value="65536">65536 极大</option><option value="131072">131072 原生</option></select></span><span class="src" data-key="ctx_size">🌐</span></div>
           <div class="field"><label>线程数</label><span class="num-wrap"><input type="number" id="p-threads" value="0" min="1"><select class="preset" data-target="p-threads"><option value="">▾ 预设</option><option value="0">0 自动</option><option value="4">4</option><option value="8">8</option><option value="12">12</option><option value="16">16</option><option value="24">24</option><option value="32">32</option></select></span><span class="src" data-key="threads">🌐</span></div>
           <div class="field"><label>批大小</label><span class="num-wrap"><input type="number" id="p-batch_size" value="2048"><select class="preset" data-target="p-batch_size"><option value="">▾ 预设</option><option value="512">512</option><option value="1024">1024</option><option value="2048">2048 默认</option><option value="4096">4096</option><option value="8192">8192 超大</option></select></span><span class="src" data-key="batch_size">🌐</span></div>
+          <div class="field"><label>微批大小</label><span class="num-wrap"><input type="number" id="p-ubatch_size" value="" placeholder="512（默认）" min="1"><select class="preset" data-target="p-ubatch_size"><option value="">▾ 预设</option><option value="256">256</option><option value="512">512 默认</option><option value="1024">1024</option><option value="2048">2048</option></select></span><span class="src" data-key="ubatch_size">🌐</span></div>
+          <div class="field"><label>批处理线程数</label><span class="num-wrap"><input type="number" id="p-threads_batch" value="" placeholder="0（跟随线程数）" min="0"><select class="preset" data-target="p-threads_batch"><option value="">▾ 预设</option><option value="0">0 跟随主线程</option><option value="4">4</option><option value="8">8</option><option value="16">16</option></select></span><span class="src" data-key="threads_batch">🌐</span></div>
           <div class="field"><label>Flash Attn</label>
             <select id="p-flash_attn"><option value="on">on（✅推荐，省显存加速）</option><option value="off">off（关闭，兼容最好）</option><option value="auto">auto（自动）</option></select><span class="src" data-key="flash_attn">🌐</span>
           </div>
@@ -71,16 +125,19 @@
           </div>
           <div class="field"><label>RoPE 缩放因子</label><input type="number" id="p-rope_scale" value="" placeholder="自动" min="0" step="0.1"></div>
           <div class="field"><label>多模态 mmproj</label><input type="text" id="p-mmproj" placeholder="mmproj.gguf 路径（可选）"></div>
+          <div class="field"><label class="chk"><input type="checkbox" id="p-no_mmproj_offload"> mmproj 走 CPU（省显存给主模型，提速）</label></div>
           <div class="field"><label>并行槽位</label><input type="number" id="p-parallel" value="" placeholder="-1（自动）" min="-1"></div>
           <div class="field"><label class="chk"><input type="checkbox" id="p-embedding"> 嵌入模式</label></div>
           <div class="field"><label class="chk"><input type="checkbox" id="p-rerank"> 重排模式</label></div>
           <div class="field"><label class="chk"><input type="checkbox" id="p-cpu_moe"> MoE 专家驻留 CPU</label></div>
+          <div class="field"><label>CPU 专家数</label><span class="num-wrap"><input type="number" id="p-n_cpu_moe" value="" placeholder="0（自动）" min="0"><select class="preset" data-target="p-n_cpu_moe"><option value="">▾ 预设</option><option value="0">0 自动</option><option value="4">4</option><option value="8">8</option><option value="16">16</option></select></span><span class="src" data-key="n_cpu_moe">🌐</span></div>
         </fieldset>
 
-        <!-- 🧩 MTP 投机解码（仅 MTP 模型显示）-->
-        <fieldset class="cfg-group" id="cfg-group-mtp" hidden>
-          <legend>🧩 MTP 投机解码</legend>
-          <div class="field"><label class="chk"><input type="checkbox" id="p-spec_type"> 🚀 启用 MTP 多 Token 预测（draft-mtp，用模型自带 MTP 头投机加速）</label></div>
+        <!-- 🧩 投机解码（MTP 多 Token 预测 / 外部草稿模型）-->
+        <fieldset class="cfg-group" id="cfg-group-mtp">
+          <legend>🧩 投机解码</legend>
+          <div class="field"><label class="chk"><input type="checkbox" id="p-spec_type"> 🚀 启用投机解码（MTP 模型=用自带 MTP 头；普通模型=填下方独立草稿模型）</label></div>
+          <div class="field"><label>独立草稿模型</label><input type="text" id="p-model_draft" placeholder="可选：外部草稿 GGUF 路径（留空=用 MTP 头）"></div>
           <div class="field"><label>草稿 GPU 层数</label><span class="num-wrap"><input type="number" id="p-n_gpu_layers_draft" value="" placeholder="0（全CPU）" min="0"><select class="preset" data-target="p-n_gpu_layers_draft"><option value="">▾ 预设</option><option value="0">0 纯CPU</option><option value="16">16 中显存</option><option value="33">33 全量</option><option value="40">40 全部</option></select></span></div>
           <div class="field"><label>草稿线程数</label><span class="num-wrap"><input type="number" id="p-spec_draft_threads" value="" placeholder="0（自动）" min="0"><select class="preset" data-target="p-spec_draft_threads"><option value="">▾ 预设</option><option value="0">0 自动</option><option value="4">4</option><option value="8">8</option><option value="16">16</option><option value="32">32</option></select></span></div>
           <div class="field"><label>草稿最大 token</label><span class="num-wrap"><input type="number" id="p-spec_draft_n_max" value="" placeholder="3（默认）" min="1"><select class="preset" data-target="p-spec_draft_n_max"><option value="">▾ 预设</option><option value="1">1</option><option value="2">2</option><option value="3">3 默认</option><option value="4">4</option><option value="5">5</option></select></span></div>
@@ -96,8 +153,10 @@
           <div class="field"><label>Top-P</label><input type="number" id="p-top_p" value="0.95" min="0" max="1" step="0.01"></div>
           <div class="field"><label>Top-K</label><input type="number" id="p-top_k" value="40" min="0"></div>
           <div class="field"><label>Min-P</label><input type="number" id="p-min_p" value="0.05" min="0" max="1" step="0.01"></div>
-          <div class="field"><label>采样器链</label><input type="text" id="p-samplers" value="penalties;dry;top_k;top_p;min_p;temperature"></div>
+          <div class="field"><label>采样器链</label><input type="text" id="p-samplers" value="penalties;dry;top_n_sigma;top_k;typ_p;top_p;min_p;xtc;temperature"></div>
+          <div class="field"><label>简化采样序列</label><input type="text" id="p-sampler_seq" value="" placeholder="edskypmxt（单字符序列，与采样器链二选一）"></div>
           <div class="field"><label>种子</label><input type="number" id="p-seed" value="-1"></div>
+          <div class="field"><label class="chk"><input type="checkbox" id="p-ignore_eos"> 忽略 EOS（生成不因结束符停止）</label></div>
           <div class="field"><label>重复惩罚</label><input type="number" id="p-repeat_penalty" value="" placeholder="1.0（禁用）" min="0" step="0.05"></div>
           <div class="field"><label>存在惩罚</label><input type="number" id="p-presence_penalty" value="" placeholder="0（禁用）" step="0.1"></div>
           <div class="field"><label>频率惩罚</label><input type="number" id="p-frequency_penalty" value="" placeholder="0（禁用）" step="0.1"></div>
@@ -125,8 +184,10 @@
           <div class="field"><label>端口</label><input type="number" id="p-port" value="8080" min="1" max="65535"></div>
           <div class="field"><label>API Key（仅本次）</label><input type="password" id="p-api_key" placeholder="可选"><button class="btn small" id="p-key-gen" title="自动生成随机 API Key">🎲</button><button class="btn small" id="p-key-copy" title="复制到剪贴板">📋</button><button class="btn small" id="p-key-toggle" title="显示/隐藏">👁</button></div>
           <div class="field"><label>HTTP 线程数</label><input type="number" id="p-threads_http" value="" placeholder="-1（自动）" min="-1"></div>
-          <div class="field"><label class="chk"><input type="checkbox" id="p-metrics"> Prometheus 指标</label></div>
+          <div class="field"><label class="chk"><input type="checkbox" id="p-metrics" checked> Prometheus 指标</label></div>
           <div class="field"><label class="chk"><input type="checkbox" id="p-props"> 运行时改参数</label></div>
+          <div class="field"><label class="chk"><input type="checkbox" id="p-slots"> 槽位监控端点 /slots（配合监控面板）</label></div>
+          <div class="field"><label class="chk"><input type="checkbox" id="p-agent"> 🧠 智能工具模式（内置工具：文件/搜索/执行，无需配置）</label></div>
         </fieldset>
       </div>
 
@@ -152,6 +213,7 @@
         <button class="btn primary" id="btn-start">▶ 启动</button>
         <button class="btn" id="btn-stop">⏹ 停止</button>
         <button class="btn" id="btn-restart">🔄 重启</button>
+        <button class="btn" id="btn-open-ui" title="打开当前选中模型运行实例的 Web 界面">🔗 打开界面</button>
         <button class="btn" id="btn-export">📋 导出脚本</button>
       </div>
 
@@ -159,24 +221,35 @@
       <pre class="cmd-preview" id="cmd-preview">选择模型并调整参数后，这里会实时预览命令行。</pre>
     </section>
 
-    <!-- 性能监控 -->
-    <section class="panel" id="metrics-panel">
-      <h2 class="panel-title">📊 性能监控</h2>
+    <!-- 性能监控（概览 = KPI + 大图 + 实时监控合并） -->
+    <section class="panel" id="metrics-panel" data-mtab="overview">
+      <h2 class="panel-title">📊 性能监控
+        <span class="log-tools" style="border-bottom:none">
+          <button class="btn small" id="btn-monitor-refresh2" title="刷新">🔄 刷新</button>
+          <button class="btn small" id="btn-monitor-export2" title="导出监控数据（指标 + 请求历史）为 CSV">📥 导出</button>
+        </span>
+      </h2>
       <div class="metric-stats">
         <div class="metric"><span class="m-label">吞吐</span><span class="m-value" id="m-tps">--</span><span class="m-unit">tok/s</span></div>
         <div class="metric"><span class="m-label">已生成</span><span class="m-value" id="m-tokens">0</span></div>
         <div class="metric"><span class="m-label">KV 占用</span><span class="m-value" id="m-kv">--</span></div>
       </div>
-      <div id="tps-chart" class="chart" style="height:180px"></div>
+      <div id="tps-chart" class="chart" style="height:320px"></div>
+      <div class="monitor-hint" style="margin-top:16px">📊 实例实时监控（数据来自各实例 /metrics，包含外部 API 调用，每 5 秒自动刷新）</div>
+      <div id="monitor-inline" class="monitor-body">
+        <div class="empty-hint">暂无运行实例。启动模型后这里会实时显示每实例的输入/输出 token、速率、并发槽位与 KV 占用。</div>
+      </div>
     </section>
 
     <!-- 日志控制台 -->
-    <section class="panel" id="log-panel">
+    <section class="panel" id="log-panel" data-mtab="console">
       <h2 class="panel-title">📋 日志控制台
         <span class="log-tools">
           <select id="log-level"><option value="all">全部</option><option>INFO</option><option>WARN</option><option>ERROR</option><option>DEBUG</option></select>
           <select id="log-session"><option value="">全部实例</option></select>
           <input type="text" id="log-search" placeholder="🔍 搜索…">
+          <label class="chk log-autoscroll" title="新日志自动滚到底部"><input type="checkbox" id="log-autoscroll" checked> 自动滚动</label>
+          <button class="btn small" id="btn-log-open-ui" title="打开当前筛选实例的 Web 界面">🔗 打开界面</button>
           <button class="btn small" id="btn-log-pause">⏸ 暂停</button>
           <button class="btn small" id="btn-log-clear">🗑 清空</button>
           <button class="btn small" id="btn-log-export">📥 导出</button>
@@ -189,6 +262,7 @@
   <footer class="footer">
     模型库: <b id="foot-models">0</b> 个模型 | 预设: 6 个方案 | 今日会话: <b id="foot-sessions">0</b> 次
   </footer>
+  </div><!-- /main-area -->
 
   <!-- 模型库抽屉 -->
   <div class="drawer" id="library-drawer">
@@ -268,6 +342,41 @@
       <div class="modal-foot">
         <button class="btn" data-close>关闭</button>
       </div>
+    </div>
+  </div>
+
+  <!-- 实时监控弹窗 -->
+  <div class="modal-overlay" id="monitor-modal" hidden>
+    <div class="modal modal-wide">
+      <div class="modal-head">
+        <h3>📡 实时监控</h3>
+        <button class="btn small" id="btn-monitor-export" title="导出监控数据（指标 + 请求历史）为 CSV">📥 导出</button>
+        <button class="btn small" id="btn-monitor-refresh" title="刷新">🔄</button>
+        <button class="btn small" data-close>✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="monitor-hint">📊 数据来自每个实例的 <code>/metrics</code>（llama-server <b>全局计数</b>）——<b>包含外部 API Key 调用</b>，每 5 秒自动刷新。</div>
+        <div id="monitor-body" class="monitor-body">
+          <div class="empty-hint">暂无运行实例。启动模型后这里会实时显示输入/输出 token、速率、并发槽位与 KV 占用。</div>
+        </div>
+      </div>
+      <div class="modal-foot"><button class="btn" data-close>关闭</button></div>
+    </div>
+  </div>
+
+  <!-- 实例大图 / 请求历史弹窗 -->
+  <div class="modal-overlay" id="monitor-big-modal" hidden>
+    <div class="modal modal-wide">
+      <div class="modal-head">
+        <h3 id="big-title">📈 实例详情</h3>
+        <button class="btn small" data-close>✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="big-chart" class="monitor-chart" style="height:360px"></div>
+        <div class="monitor-hint" style="margin-top:10px">📋 请求历史（最近 50 条，含外部 API 调用）</div>
+        <div id="big-history" class="req-history" style="max-height:260px"></div>
+      </div>
+      <div class="modal-foot"><button class="btn" data-close>关闭</button></div>
     </div>
   </div>
 
@@ -352,18 +461,27 @@
   <div class="modal-overlay" id="mcp-modal" hidden>
     <div class="modal modal-wide">
       <div class="modal-head">
-        <h3>🧩 MCP 服务器管理</h3>
+        <h3>🧩 工具扩展（MCP）</h3>
         <button class="btn small" id="mcp-refresh" title="刷新">🔄</button>
         <button class="btn small" data-close>✕</button>
       </div>
       <div class="modal-body">
-        <fieldset class="cfg-group" style="margin-bottom:12px">
-          <legend>➕ 注册新服务器</legend>
-          <div class="field"><label>名称</label><input type="text" id="mcp-name" placeholder="filesystem"></div>
-          <div class="field"><label>命令</label><input type="text" id="mcp-command" placeholder="npx 或 npx.cmd 等"></div>
-          <div class="field"><label>参数</label><input type="text" id="mcp-args" placeholder="-y @modelcontextprotocol/server-filesystem D:/"></div>
-          <div class="field"><label></label><button class="btn primary" id="mcp-add">💾 注册</button></div>
-        </fieldset>
+        <div id="mcp-env-hint" class="mcp-env-hint"></div>
+        <div class="mcp-section">
+          <h4 class="mcp-sec-title">✨ 从模板添加（推荐）</h4>
+          <div id="mcp-template-list" class="mcp-template-list"></div>
+        </div>
+        <details class="mcp-manual">
+          <summary>⚙️ 手动添加高级工具</summary>
+          <fieldset class="cfg-group" style="margin-bottom:12px;margin-top:8px">
+            <legend>➕ 注册新服务器</legend>
+            <div class="field"><label>名称</label><input type="text" id="mcp-name" placeholder="filesystem"></div>
+            <div class="field"><label>命令</label><input type="text" id="mcp-command" placeholder="npx 或 npx.cmd 等"></div>
+            <div class="field"><label>参数</label><input type="text" id="mcp-args" placeholder="-y @modelcontextprotocol/server-filesystem D:/"></div>
+            <div class="field"><label></label><button class="btn primary" id="mcp-add">💾 注册</button></div>
+          </fieldset>
+        </details>
+        <h4 class="mcp-sec-title">📦 已添加的工具</h4>
         <div id="mcp-list"></div>
       </div>
       <div class="modal-foot"><button class="btn" data-close>关闭</button></div>
@@ -391,6 +509,26 @@
           <button class="btn small" id="set-key-clear" title="清除已存 Key">🗑</button>
         </div>
         <div class="modal-info" id="set-key-hint"></div>
+
+        <fieldset class="cfg-group" style="margin-top:12px">
+          <legend>🎨 界面设置（即时生效，自动保存）</legend>
+          <div class="field"><label>主题</label>
+            <select id="ui-theme">
+              <option value="dark">🌙 暗色（默认）</option>
+              <option value="light">☀️ 亮色（奶白）</option>
+              <option value="saas">💎 SaaS 浅紫（现代仪表盘）</option>
+              <option value="violet">🟣 紫色</option>
+            </select>
+          </div>
+          <div class="field"><label>布局</label>
+            <select id="ui-layout">
+              <option value="tabs">🗂 Tab 式（默认）</option>
+              <option value="dash">🖥 双栏仪表盘</option>
+              <option value="stack">📜 单栏堆叠</option>
+            </select>
+          </div>
+          <div class="field"><label class="chk"><input type="checkbox" id="ui-compact"> 紧凑模式（减小间距密度）</label></div>
+        </fieldset>
       </div>
       <div class="modal-foot">
         <button class="btn" data-close>取消</button>
@@ -426,14 +564,29 @@
         <div class="tabbar" id="test-tabs">
           <button class="tab active" data-tab="batch">🖥 多模型测试</button>
           <button class="tab" data-tab="sweep">🔬 参数扫描</button>
+          <button class="tab" data-tab="history">📜 历史</button>
         </div>
 
         <!-- 多模型批量测试 -->
         <div class="tab-pane" id="tab-batch">
           <div class="field"><label>测试提问</label><input type="text" id="test-prompt" value="你好，用一句话介绍你自己"></div>
-          <div class="field"><label>最大生成 token</label><input type="number" id="test-max-tokens" value="16" min="1" max="512"></div>
-          <div class="modal-info" style="margin:4px 0 8px">每个模型会依次启动 → 发一条测试消息 → 自动停止。大模型加载较慢，请耐心等待。</div>
+          <div class="field-row">
+            <div class="field"><label>最大生成 token</label><input type="number" id="test-max-tokens" value="16" min="1" max="512" style="width:110px"></div>
+            <div class="field grow"><button class="btn tiny" id="btn-test-params" type="button" title="展开/收起测试参数">⚙️ 测试参数 ▾</button></div>
+          </div>
+          <div id="test-params" hidden>
+            <div class="field-row">
+              <div class="field"><label>上下文 ctx</label><input type="number" id="tp-ctx_size" value="1024" min="128" step="256" style="width:110px"></div>
+              <div class="field"><label>GPU 层数（留空=模型默认）</label><input type="number" id="tp-n_gpu_layers" value="" placeholder="0" min="0" style="width:110px"></div>
+              <div class="field"><label>线程数</label><input type="number" id="tp-threads" value="" placeholder="0 自动" min="0" style="width:110px"></div>
+              <div class="field"><label>批大小</label><input type="number" id="tp-batch_size" value="" placeholder="2048" min="1" style="width:110px"></div>
+              <div class="field"><label>温度</label><input type="number" id="tp-temperature" value="0.1" min="0" step="0.05" style="width:110px"></div>
+            </div>
+            <div class="modal-info" style="margin:2px 0 4px">留空 = 默认（ctx 固定 1024 便于横向对比；GPU 层数跟随模型默认）。参数应用到所有勾选模型。</div>
+          </div>
+          <div class="modal-info" style="margin:4px 0 8px">每个模型会依次启动 → 发一条测试消息 → 自动停止。大模型加载较慢，可随时「⏹ 取消」。</div>
           <div id="test-models" class="test-model-list"></div>
+          <div id="test-chart" class="test-chart" style="height:200px;display:none"></div>
           <div id="test-result"></div>
         </div>
 
@@ -442,27 +595,86 @@
           <div class="field"><label>选择模型</label><select id="sweep-model" class="sel"></select></div>
           <div class="field-row">
             <div class="field grow"><label>测试提问</label><input type="text" id="sweep-prompt" value="你好，用一句话介绍你自己"></div>
-            <div class="field"><label>最大生成 token</label><input type="number" id="sweep-max-tokens" value="16" min="1" max="512" style="width:96px"></div>
+            <div class="field"><label>最大生成 token</label><input type="number" id="sweep-max-tokens" value="32" min="1" max="512" style="width:96px"></div>
+            <div class="field"><button class="btn tiny" id="btn-sweep-settings" type="button" title="展开/收起扫描设置">⚙️ 扫描设置 ▾</button></div>
           </div>
-          <div class="modal-info" style="margin:2px 0 6px">逗号分隔填 <strong>多个值</strong> = 该参数参与扫描组合；填 <strong>单个值</strong> = 该参数<strong>固定</strong>用于每个组合（例如固定上下文 16384，只扫 GPU 层数）。留空 = 不参与（用默认值）。</div>
+          <div id="sweep-settings" hidden>
+            <div class="field-row">
+              <div class="field"><label>每组合测量次数</label><select id="sp-repeats" style="width:140px"><option value="1">1 次（最快）</option><option value="2">2 次取平均</option><option value="3">3 次取平均（最稳）</option></select></div>
+              <div class="field"><label class="chk"><input type="checkbox" id="sp-warmup"> 测量前预热（消除首轮开销）</label></div>
+              <div class="field"><label>基础 ctx</label><input type="number" id="sp-ctx" value="1024" min="128" step="256" style="width:110px" title="所有组合的固定上下文（也可单独作为扫描参数覆盖）"></div>
+            </div>
+            <div class="modal-info" style="margin:2px 0 4px">重复测量在同一实例内完成（不重复启动模型，只增加推理时间）；预热先发一次小请求使结果更稳定。</div>
+          </div>
+          <div class="modal-info" style="margin:2px 0 6px">逗号分隔填 <strong>多个值</strong> = 该参数参与扫描组合；填 <strong>单个值</strong> = 该参数<strong>固定</strong>用于每个组合。留空 = 不参与（用默认值）。</div>
           <div class="sweep-modebar">
             <span class="sm-label">模式</span>
             <button class="chip active" data-smode="exhaustive" title="测试所有参数组合的笛卡尔积">⚡ 穷举扫描</button>
-            <button class="chip" data-smode="greedy" title="逐个参数依次优化，其余参数固定在当前最优（推荐，数量大时快很多）">🔍 智能寻优</button>
-            <button class="btn tiny" id="btn-sweep-fillall" hidden title="给所有参数填入常用档位，智能寻优时全部参数都会参与（穷举模式会组合爆炸不建议）">🪄 全参数</button>
+            <button class="chip" data-smode="greedy" title="整体寻优：先全局探索参数空间，再从最优的几个起点局部精调，取全局最优（推荐，数量大时快很多）">🔍 整体寻优</button>
+            <button class="btn tiny" id="btn-sweep-fillall" hidden title="给所有参数填入常用档位，整体寻优时全部参数都会参与（穷举模式会组合爆炸不建议）">🪄 全参数</button>
+          </div>
+          <div class="scenario-bar" title="一键按场景点亮常用扫描参数组合（仍可继续手动调整）">
+            <span class="sm-label">场景</span>
+            <button class="chip" data-scenario="speed" title="追求高吞吐：全量上 GPU、高并发、大 batch">🚀 极速</button>
+            <button class="chip" data-scenario="vram" title="低显存占用：量化 KV、低 ctx、部分卸载">💾 省显存</button>
+            <button class="chip" data-scenario="bal" title="吞吐与显存兼顾">⚖️ 均衡</button>
+            <button class="btn tiny" id="btn-sweep-clear" title="清空所有扫描参数">🧹 清空</button>
           </div>
           <div id="sweep-params"></div>
+          <div style="display:flex;align-items:center;gap:8px;margin-top:4px">
+            <span class="modal-info" style="flex:1">💡 要扫更多参数？从下拉添加。</span>
+            <select id="sweep-add-param" style="width:240px"><option value="">➕ 添加更多参数…</option></select>
+          </div>
           <div id="sweep-estimate" class="sweep-est"></div>
+          <div class="test-chart" style="height:200px" hidden>
+            <div style="display:flex;align-items:center;gap:8px">
+              <span class="modal-info" style="flex:1">📊 各组合对比</span>
+              <select id="sweep-chart-metric" style="width:180px">
+                <option value="tps">吞吐 tok/s</option>
+                <option value="prompt_ms">首 token 延迟 ms</option>
+                <option value="load_ms">加载时间 ms</option>
+                <option value="pareto">🎯 帕累托前沿（显存×速度）</option>
+              </select>
+            </div>
+            <div id="sweep-chart" class="test-chart" style="height:170px"></div>
+          </div>
           <div id="sweep-result"></div>
+          <div class="test-chart" id="sweep-radar-wrap" style="height:210px;margin-top:6px" hidden>
+            <div style="display:flex;align-items:center;gap:8px">
+              <span class="modal-info" style="flex:1">🕸 性能雷达（最优组合 vs 平均，4 维归一化越高越好）</span>
+              <button class="btn tiny" id="sweep-radar-close" title="收起">✕</button>
+            </div>
+            <div id="sweep-radar" class="test-chart" style="height:180px"></div>
+          </div>
+        </div>
+
+        <!-- 测试历史 -->
+        <div class="tab-pane" id="tab-history" hidden>
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+            <span class="modal-info grow">历次测试汇总（data/test_history.json，最多 50 条）。</span>
+            <button class="btn tiny" id="btn-hist-refresh" title="刷新">🔄</button>
+            <button class="btn tiny" id="btn-hist-clear" title="清空全部历史">🗑 清空</button>
+          </div>
+          <div id="test-history-list"></div>
         </div>
       </div>
       <div class="modal-foot">
         <span class="modal-info" id="test-summary"></span>
+        <span class="stage-bar" id="stage-bar" hidden title="当前测试进行到的阶段">
+          <span class="stage-chip" data-stage="queued">⏳ 排队</span>
+          <span class="stage-chip" data-stage="validating">🔎 校验</span>
+          <span class="stage-chip" data-stage="auditing">📋 审计</span>
+          <span class="stage-chip" data-stage="warming_up">🔥 预热</span>
+          <span class="stage-chip" data-stage="benchmarking">⚡ 基准</span>
+          <span class="stage-chip" data-stage="cleaning">🧹 清理</span>
+        </span>
         <span class="savecfg-row" id="savecfg-row" hidden>
           <input type="text" id="savecfg-name" placeholder="配置名称（如 2048ctx·GPU33）" style="width:230px">
           <button class="btn primary" id="savecfg-confirm">💾 保存</button>
           <button class="btn" id="savecfg-cancel">取消</button>
         </span>
+        <button class="btn" id="test-cancel" hidden title="中断当前测试/扫描">⏹ 取消</button>
+        <button class="btn" id="test-export" hidden title="导出本次测试/扫描结果为 CSV">📥 导出</button>
         <button class="btn" id="test-savecfg" hidden title="把这次测试的最优参数保存到模型库，下次一键套用">💾 保存最优配置</button>
         <button class="btn primary" id="test-start">▶ 开始测试</button>
       </div>

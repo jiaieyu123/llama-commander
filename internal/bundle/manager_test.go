@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"llama-commander/internal/gguf"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -185,5 +187,95 @@ func TestScanDir(t *testing.T) {
 		t.Fatal("sharded candidate not found")
 	} else if !s.Bundle.ShardInfo.IsSharded || s.Bundle.ShardInfo.TotalShards != 2 {
 		t.Errorf("shard info wrong: %+v", s.Bundle.ShardInfo)
+	}
+}
+
+// TestMetadataPrune guards the bundles.json slim-down: the raw GGUF metadata
+// map (tokenizer vocab etc., tens of MB per model) must be dropped on save
+// and load, while the typed display/config fields and MoE detection survive.
+func TestMetadataPrune(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bundles.json")
+	m, err := NewManager(path)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	big := strings.Repeat("x", 1024*1024) // 1 MiB fake vocab payload
+	md := &gguf.ModelInfo{
+		Architecture:  "qwen2vl",
+		ContextLength: 32768,
+		BlockCount:    32,
+		NumExperts:    8,
+		FileType:      7,
+		FileTypeName:  "Q8_0",
+		Moe:           true,
+		Metadata: map[string]any{
+			"general.architecture":  "qwen2vl",
+			"tokenizer.ggml.tokens": []any{big},
+		},
+	}
+	b := &Bundle{Name: "VL", BaseModel: ModelFile{Path: "x.gguf", Metadata: md}}
+	if err := m.Add(b); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), big) {
+		t.Fatal("bundles.json still contains the raw metadata map (not pruned)")
+	}
+	if !strings.Contains(string(data), `"expert_count": 8`) {
+		t.Fatalf("typed expert_count not persisted:\n%s", data)
+	}
+
+	// Reload: raw map gone from memory, typed fields and MoE detection intact.
+	m2, err := NewManager(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	got := m2.List()[0]
+	if got.BaseModel.Metadata == nil {
+		t.Fatal("metadata typed fields lost on reload")
+	}
+	if got.BaseModel.Metadata.Metadata != nil {
+		t.Fatal("raw metadata map still present after reload")
+	}
+	if got.BaseModel.Metadata.Architecture != "qwen2vl" || got.BaseModel.Metadata.ContextLength != 32768 {
+		t.Fatalf("typed fields lost: %+v", got.BaseModel.Metadata)
+	}
+	if !got.BaseModel.Metadata.IsMoE() {
+		t.Fatal("IsMoE should be true after prune")
+	}
+	if got.BaseModel.Metadata.ExpertCount() != 8 {
+		t.Fatalf("ExpertCount = %d, want 8", got.BaseModel.Metadata.ExpertCount())
+	}
+}
+
+// TestTestConfigCap verifies per-model saved configs are capped so they can't
+// accumulate without bound.
+func TestTestConfigCap(t *testing.T) {
+	dir := t.TempDir()
+	m, err := NewManager(filepath.Join(dir, "bundles.json"))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	b := &Bundle{Name: "Cap"}
+	if err := m.Add(b); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	for i := 0; i < 40; i++ {
+		if _, err := m.AddTestConfig(b.ID, TestConfig{Name: fmt.Sprintf("cfg%d", i)}); err != nil {
+			t.Fatalf("AddTestConfig %d: %v", i, err)
+		}
+	}
+	got, _ := m.Get(b.ID)
+	if len(got.TestConfigs) > 30 {
+		t.Fatalf("test configs = %d, want capped at 30", len(got.TestConfigs))
+	}
+	if got.TestConfigs[len(got.TestConfigs)-1].Name != "cfg39" {
+		t.Fatalf("newest config should be kept, got %q", got.TestConfigs[len(got.TestConfigs)-1].Name)
 	}
 }

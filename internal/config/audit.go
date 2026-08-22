@@ -41,7 +41,10 @@ func AuditConfig(params map[string]any, spec ModelSpec, hw *HardwareInfo) []Audi
 	// VRAM budget
 	ngl := intParam(params, "n_gpu_layers")
 	ctx := intParam(params, "ctx_size")
-	est := EstimateVRAM(spec, ngl, ctx, hw)
+	kvK := strParam(params, "cache_type_k")
+	kvV := strParam(params, "cache_type_v")
+	mmprojCPU := boolParam(params, "no_mmproj_offload")
+	est := EstimateVRAMEx(spec, ngl, ctx, hw, kvK, kvV, mmprojCPU)
 	if hw != nil && hw.TotalVRAMMB > 0 {
 		avail := float64(hw.FreeVRAMMB) / 1024.0
 		if est > avail {
@@ -55,6 +58,14 @@ func AuditConfig(params map[string]any, spec ModelSpec, hw *HardwareInfo) []Audi
 				Message: fmt.Sprintf("VRAM 余量仅 %.1fGB，建议降低 GPU 层数或上下文", avail-est),
 			})
 		}
+	}
+
+	// Vision projector: in pure-text usage it can run on CPU to free VRAM.
+	if spec.MMProjSizeMB > 0 && !mmprojCPU {
+		items = append(items, AuditItem{
+			Code: "mmproj_vram", Level: AuditInfo, Field: "no_mmproj_offload",
+			Message: fmt.Sprintf("已绑定视觉投影 mmproj (%.0f MB)，纯文本场景勾选「mmproj 走 CPU」可省显存给主模型层", spec.MMProjSizeMB),
+		})
 	}
 
 	// Sampler conflicts: Mirostat + top-k/top-p

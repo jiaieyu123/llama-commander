@@ -55,18 +55,18 @@ func (h *HealthChecker) Health(ctx context.Context) (bool, error) {
 
 // Metrics is the JSON shape exposed by llama-server /metrics.
 type Metrics struct {
-	TPromptProcessing       float64 `json:"t_prompt_processing"`
-	TEval                   float64 `json:"t_eval"`
-	NPromptTokensProcessed  int64   `json:"n_prompt_tokens_processed"`
-	NPredicted              int64   `json:"n_predicted"`
-	NPromptTokensTotal      int64   `json:"n_prompt_tokens_total"`
-	NPredictedTokensTotal   int64   `json:"n_predicted_tokens_total"`
-	KVCacheUsageRatio       float64 `json:"kv_cache_usage_ratio"`
-	KVCacheTokensCount      int64   `json:"kv_cache_tokens_count"`
-	SlotsIdle               int     `json:"slots_idle"`
-	SlotsProcessing         int     `json:"slots_processing"`
-	PromptPerSecond         float64 `json:"prompt_per_second"`
-	PredictedPerSecond      float64 `json:"predicted_per_second"`
+	TPromptProcessing      float64 `json:"t_prompt_processing"`
+	TEval                  float64 `json:"t_eval"`
+	NPromptTokensProcessed int64   `json:"n_prompt_tokens_processed"`
+	NPredicted             int64   `json:"n_predicted"`
+	NPromptTokensTotal     int64   `json:"n_prompt_tokens_total"`
+	NPredictedTokensTotal  int64   `json:"n_predicted_tokens_total"`
+	KVCacheUsageRatio      float64 `json:"kv_cache_usage_ratio"`
+	KVCacheTokensCount     int64   `json:"kv_cache_tokens_count"`
+	SlotsIdle              int     `json:"slots_idle"`
+	SlotsProcessing        int     `json:"slots_processing"`
+	PromptPerSecond        float64 `json:"prompt_per_second"`
+	PredictedPerSecond     float64 `json:"predicted_per_second"`
 }
 
 // Metrics probes GET /metrics and decodes the payload. llama.cpp serves two

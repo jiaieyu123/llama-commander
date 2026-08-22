@@ -2,8 +2,9 @@
 //
 // 主入口：HTTP REST API + WebSocket 日志流 + 内嵌静态前端 + 子进程生命周期管理。
 // 用法:
-//   llama-commander                      启动 Web 服务
-//   llama-commander parse <model.gguf>   单独测试 GGUF 解析
+//
+//	llama-commander                      启动 Web 服务
+//	llama-commander parse <model.gguf>   单独测试 GGUF 解析
 package main
 
 import (
@@ -15,10 +16,13 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand/v2"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -57,9 +61,9 @@ type GlobalConfig struct {
 	BinaryPath       string         `json:"binary_path"`
 	DefaultParams    map[string]any `json:"default_params"`
 	LogRetentionDays int            `json:"log_retention_days"`
-	HFEndpoint       string         `json:"hf_endpoint,omitempty"`         // HF 镜像覆盖
-	CacheDir         string         `json:"cache_dir,omitempty"`           // llama.cpp 模型下载缓存目录（空=默认 ~/.cache/llama.cpp）
-	ServerAPIKeyEnc  string         `json:"server_api_key_enc,omitempty"`  // AES-256-GCM 加密
+	HFEndpoint       string         `json:"hf_endpoint,omitempty"`        // HF 镜像覆盖
+	CacheDir         string         `json:"cache_dir,omitempty"`          // llama.cpp 模型下载缓存目录（空=默认 ~/.cache/llama.cpp）
+	ServerAPIKeyEnc  string         `json:"server_api_key_enc,omitempty"` // AES-256-GCM 加密
 }
 
 // DefaultGlobalConfig returns sensible defaults.
@@ -102,9 +106,19 @@ type App struct {
 
 	mu            sync.Mutex
 	runners       map[string]*activeRun
-	metricsTick   int // throttles session persistence
+	liveMetrics   map[string]*llama.Metrics // 最近一次 /metrics 快照（实时监控）
+	reqCur        map[string]*RequestRecord
+	reqHistory    map[string][]RequestRecord // 每实例最近请求记录（上限 50）
+	metricsTick   int                        // throttles session persistence
 	configPath    string
 	secretKeyPath string
+
+	testCancel  map[string]bool           // 测试 jobID → 取消请求
+	testHistory []TestHistoryRecord       // 测试历史（最近 50 条，data/test_history.json）
+	testOOM     map[string]bool           // 会话 → 检测到 CUDA OOM（熔断标记）
+	testPortMu  sync.Mutex                // 测试端口分配互斥（显存感知并行用）
+	testPorts   map[int]bool              // 测试已分配端口（并行时避免冲突）
+	testCache   map[string]testCacheEntry // L2 磁盘缓存（历史测过的组合，data/test_cache.json）
 }
 
 // activeRun couples a session with its live process.
@@ -126,7 +140,7 @@ type wsClient struct {
 
 func NewHub() *Hub { return &Hub{clients: make(map[*wsClient]bool)} }
 
-func (h *Hub) register(c *wsClient)  { h.mu.Lock(); h.clients[c] = true; h.mu.Unlock() }
+func (h *Hub) register(c *wsClient) { h.mu.Lock(); h.clients[c] = true; h.mu.Unlock() }
 func (h *Hub) unregister(c *wsClient) {
 	h.mu.Lock()
 	if _, ok := h.clients[c]; ok {
@@ -222,19 +236,28 @@ func NewApp(cfg *GlobalConfig) (*App, error) {
 	hw, _ := config.DetectHardware(context.Background())
 
 	a := &App{
-		cfg:            cfg,
-		registry:       config.NewRegistry(),
-		bundles:        bundlesMgr,
-		sessions:       sessionsMgr,
-		mcp:            mcpMgr,
-		cache:          bundle.NewCacheManager(cfg.CacheDir),
-		hw:             hw,
-		upgrader:       websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }},
-		hub:            NewHub(),
-		runners:        make(map[string]*activeRun),
-		configPath:     filepath.Join(cfg.DataDir, "config.json"),
-		secretKeyPath:  filepath.Join(cfg.DataDir, ".secret"),
+		cfg:           cfg,
+		registry:      config.NewRegistry(),
+		bundles:       bundlesMgr,
+		sessions:      sessionsMgr,
+		mcp:           mcpMgr,
+		cache:         bundle.NewCacheManager(cfg.CacheDir),
+		hw:            hw,
+		upgrader:      websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }},
+		hub:           NewHub(),
+		runners:       make(map[string]*activeRun),
+		liveMetrics:   make(map[string]*llama.Metrics),
+		reqCur:        make(map[string]*RequestRecord),
+		reqHistory:    make(map[string][]RequestRecord),
+		testCancel:    make(map[string]bool),
+		testOOM:       make(map[string]bool),
+		testPorts:     map[int]bool{},
+		testCache:     map[string]testCacheEntry{},
+		configPath:    filepath.Join(cfg.DataDir, "config.json"),
+		secretKeyPath: filepath.Join(cfg.DataDir, ".secret"),
 	}
+	a.loadTestHistory()
+	a.loadTestCache()
 	downloader.SetEndpoint(cfg.HFEndpoint)
 	a.startMetricsPoller(context.Background())
 	return a, nil
@@ -304,6 +327,10 @@ func (a *App) collectMetrics() {
 				sess.PeakTPS = m.PredictedPerSecond
 			}
 		}
+		if a.liveMetrics == nil {
+			a.liveMetrics = map[string]*llama.Metrics{}
+		}
+		a.liveMetrics[it.id] = m
 		a.mu.Unlock()
 		if persist && sess != nil {
 			_ = a.sessions.Update(sess)
@@ -343,6 +370,150 @@ func (a *App) handleSystem(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// RequestRecord is a single inference request parsed from llama-server's
+// "print_timing" log lines (per slot/task), so the monitor can show a per-request
+// history (prompt/eval tokens, throughput, latency, draft acceptance).
+type RequestRecord struct {
+	Time          string  `json:"time"`
+	PromptTokens  int     `json:"prompt_tokens"`
+	EvalTokens    int     `json:"eval_tokens"`
+	PromptPS      float64 `json:"prompt_ps"`
+	EvalPS        float64 `json:"eval_ps"`
+	TotalMS       float64 `json:"total_ms"`
+	DraftAccepted int     `json:"draft_accepted,omitempty"`
+	DraftTotal    int     `json:"draft_total,omitempty"`
+
+	PromptMS float64 `json:"-"` // internal, used to compute PromptPS
+	EvalMS   float64 `json:"-"`
+}
+
+var (
+	reAnsi   = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+	rePrompt = regexp.MustCompile(`prompt eval time =\s+([\d.]+) ms /\s+(\d+) tokens`)
+	reEval   = regexp.MustCompile(`eval time =\s+([\d.]+) ms /\s+(\d+) tokens`)
+	reTotal  = regexp.MustCompile(`total time =\s+([\d.]+) ms /\s+(\d+) tokens`)
+	reDraft  = regexp.MustCompile(`draft acceptance =\s+([\d.]+) \(\s*(\d+) accepted /\s*(\d+) generated\)`)
+	reRel    = regexp.MustCompile(`slot\s+release:\s*id\s+(\d+)\s*\|\s*task\s+(\d+)\s*\|\s*stop processing:\s*n_tokens\s*=\s*(\d+)`)
+)
+
+// handleServerLine processes one llama-server stdout line: it keeps publishing
+// the log line to the UI and parses print_timing fragments into per-request
+// records for the monitor's request history.
+func (a *App) handleServerLine(sid, line string) {
+	a.hub.PublishLog(sid, "INFO", line)
+	// OOM 熔断：检测 CUDA 显存不足日志，立即标记该会话（测试引擎据此中止并清理）
+	low := strings.ToLower(line)
+	if strings.Contains(low, "out of memory") || strings.Contains(low, "cudamalloc") || strings.Contains(low, "cuda error") {
+		a.mu.Lock()
+		a.testOOM[sid] = true
+		a.mu.Unlock()
+	}
+	clean := reAnsi.ReplaceAllString(line, "")
+	if m := rePrompt.FindStringSubmatch(clean); m != nil {
+		rec := a.reqRec(sid)
+		rec.PromptTokens, _ = strconv.Atoi(m[2])
+		rec.PromptMS, _ = strconv.ParseFloat(m[1], 64)
+		return
+	}
+	if m := reEval.FindStringSubmatch(clean); m != nil {
+		rec := a.reqRec(sid)
+		rec.EvalTokens, _ = strconv.Atoi(m[2])
+		rec.EvalMS, _ = strconv.ParseFloat(m[1], 64)
+		return
+	}
+	if m := reTotal.FindStringSubmatch(clean); m != nil {
+		rec := a.reqRec(sid)
+		rec.TotalMS, _ = strconv.ParseFloat(m[1], 64)
+		return
+	}
+	if m := reDraft.FindStringSubmatch(clean); m != nil {
+		rec := a.reqRec(sid)
+		rec.DraftAccepted, _ = strconv.Atoi(m[2])
+		rec.DraftTotal, _ = strconv.Atoi(m[3])
+		return
+	}
+	if reRel.MatchString(clean) {
+		a.commitRequest(sid)
+	}
+}
+
+// testOOMHit reports whether a session has logged a CUDA out-of-memory error.
+func (a *App) testOOMHit(sid string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.testOOM[sid]
+}
+
+func (a *App) reqRec(sid string) *RequestRecord {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.reqCur[sid] == nil {
+		a.reqCur[sid] = &RequestRecord{}
+	}
+	return a.reqCur[sid]
+}
+
+// commitRequest finalizes the current request (triggered by "slot release"),
+// persists it to the per-session history and broadcasts it over WS.
+func (a *App) commitRequest(sid string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	rec := a.reqCur[sid]
+	if rec == nil || (rec.PromptTokens == 0 && rec.EvalTokens == 0) {
+		a.reqCur[sid] = nil
+		return
+	}
+	rec.Time = time.Now().Format("15:04:05")
+	if rec.EvalMS > 0 && rec.EvalTokens > 0 {
+		rec.EvalPS = float64(rec.EvalTokens) / (rec.EvalMS / 1000.0)
+	}
+	if rec.PromptMS > 0 && rec.PromptTokens > 0 {
+		rec.PromptPS = float64(rec.PromptTokens) / (rec.PromptMS / 1000.0)
+	}
+	a.reqHistory[sid] = append(a.reqHistory[sid], *rec)
+	if len(a.reqHistory[sid]) > 50 {
+		a.reqHistory[sid] = a.reqHistory[sid][len(a.reqHistory[sid])-50:]
+	}
+	a.reqCur[sid] = nil
+	data, _ := json.Marshal(map[string]any{"type": "request", "session_id": sid, "req": *rec})
+	a.hub.Broadcast(data)
+}
+
+// handleMonitor returns a live snapshot of every running instance (model, port,
+// uptime + latest /metrics) for the real-time monitor panel. The metrics are
+// llama-server GLOBAL counters, so external API-key callers are included too.
+func (a *App) handleMonitor(w http.ResponseWriter, r *http.Request) {
+	type monitorInstance struct {
+		SessionID string          `json:"session_id"`
+		Bundle    string          `json:"bundle"`
+		Port      int             `json:"port"`
+		Uptime    string          `json:"uptime,omitempty"`
+		Status    string          `json:"status"`
+		Metrics   *llama.Metrics  `json:"metrics,omitempty"`
+		Requests  []RequestRecord `json:"requests,omitempty"`
+	}
+	a.mu.Lock()
+	items := make([]monitorInstance, 0, len(a.runners))
+	for id, ar := range a.runners {
+		mi := monitorInstance{SessionID: id, Port: ar.session.Port, Status: string(ar.session.Status)}
+		if b, ok := a.bundles.Get(ar.session.BundleID); ok {
+			mi.Bundle = b.Name
+		}
+		if t, err := time.Parse(time.RFC3339, ar.session.StartTime); err == nil {
+			mi.Uptime = time.Since(t).Round(time.Second).String()
+		}
+		if m, ok := a.liveMetrics[id]; ok {
+			mi.Metrics = m
+		}
+		if hs, ok := a.reqHistory[id]; ok {
+			mi.Requests = hs
+		}
+		items = append(items, mi)
+	}
+	a.mu.Unlock()
+	a.writeJSON(w, http.StatusOK, map[string]any{"instances": items})
+}
+
 // handleParams exposes the full parameter matrix (incl. default values,
 // choices and Chinese tuning guidance) for the web UI help panels.
 func (a *App) handleParams(w http.ResponseWriter, r *http.Request) {
@@ -355,7 +526,7 @@ func (a *App) handleParams(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleBundles(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		a.writeJSON(w, http.StatusOK, a.bundles.List())
+		a.writeJSON(w, http.StatusOK, annotateMTP(a.bundles.List()))
 	case http.MethodPost:
 		var b bundle.Bundle
 		if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
@@ -399,14 +570,38 @@ func (a *App) handleBundleItem(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleBundleMCPServers updates which MCP servers a bundle is bound to
+// (PUT /api/bundles/{id}/mcpservers, body {servers: [...]}).
+func (a *App) handleBundleMCPServers(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req struct {
+		Servers []string `json:"servers"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	b, ok := a.bundles.Get(id)
+	if !ok {
+		a.writeJSON(w, http.StatusNotFound, map[string]string{"error": "模型不存在"})
+		return
+	}
+	b.MCPServers = req.Servers
+	if err := a.bundles.Update(b); err != nil {
+		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	a.writeJSON(w, http.StatusOK, b.MCPServers)
+}
+
 // handleBundleConfigs saves a tested configuration to a model (POST
 // /api/bundles/{id}/configs).
 func (a *App) handleBundleConfigs(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var req struct {
-		Name   string                 `json:"name"`
-		Params map[string]any         `json:"params"`
-		Meta   bundle.TestConfigMeta  `json:"meta"`
+		Name   string                `json:"name"`
+		Params map[string]any        `json:"params"`
+		Meta   bundle.TestConfigMeta `json:"meta"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -455,15 +650,15 @@ func (a *App) handleParseGGUF(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.writeJSON(w, http.StatusOK, map[string]any{
-		"path":          info.Path,
-		"architecture":  info.Architecture,
-		"context_length": info.ContextLength,
-		"block_count":   info.BlockCount,
-		"head_count_kv": info.HeadCountKV,
+		"path":             info.Path,
+		"architecture":     info.Architecture,
+		"context_length":   info.ContextLength,
+		"block_count":      info.BlockCount,
+		"head_count_kv":    info.HeadCountKV,
 		"embedding_length": info.EmbeddingLength,
-		"file_type":     gguf.FileTypeName(info.FileType),
-		"file_size_mb":  info.FileSizeMB,
-		"metadata":      info.Metadata,
+		"file_type":        gguf.FileTypeName(info.FileType),
+		"file_size_mb":     info.FileSizeMB,
+		"metadata":         info.Metadata,
 	})
 }
 
@@ -492,23 +687,23 @@ func (a *App) handleAnalyze(w http.ResponseWriter, r *http.Request) {
 		meta = b.BaseModel.Metadata.Metadata
 	}
 	a.writeJSON(w, http.StatusOK, map[string]any{
-		"name":        b.Name,
-		"path":        req.Path,
-		"exists":      b.BaseModel.Exists,
-		"file_size_mb": b.BaseModel.FileSizeMB,
-		"architecture": b.BaseModel.Metadata.Architecture,
-		"context_length": b.BaseModel.Metadata.ContextLength,
-		"block_count":   b.BaseModel.Metadata.BlockCount,
-		"head_count_kv": b.BaseModel.Metadata.HeadCountKV,
+		"name":             b.Name,
+		"path":             req.Path,
+		"exists":           b.BaseModel.Exists,
+		"file_size_mb":     b.BaseModel.FileSizeMB,
+		"architecture":     b.BaseModel.Metadata.Architecture,
+		"context_length":   b.BaseModel.Metadata.ContextLength,
+		"block_count":      b.BaseModel.Metadata.BlockCount,
+		"head_count_kv":    b.BaseModel.Metadata.HeadCountKV,
 		"embedding_length": b.BaseModel.Metadata.EmbeddingLength,
-		"is_moe":       b.BaseModel.Metadata.IsMoE(),
-		"file_type":    gguf.FileTypeName(b.BaseModel.Metadata.FileType),
-		"shard_info":   b.ShardInfo,
-		"mmproj":       b.MMProj.Path,
-		"draft":        b.DraftModel.Path,
-		"lora":         loraPaths(b.LORAList),
-		"tags":         b.Tags,
-		"metadata":     meta,
+		"is_moe":           b.BaseModel.Metadata.IsMoE(),
+		"file_type":        gguf.FileTypeName(b.BaseModel.Metadata.FileType),
+		"shard_info":       b.ShardInfo,
+		"mmproj":           b.MMProj.Path,
+		"draft":            b.DraftModel.Path,
+		"lora":             loraPaths(b.LORAList),
+		"tags":             b.Tags,
+		"metadata":         meta,
 	})
 }
 
@@ -560,8 +755,8 @@ func (a *App) handleScan(w http.ResponseWriter, r *http.Request) {
 // recommendRequest is the body of POST /api/recommend.
 type recommendRequest struct {
 	BundleID string         `json:"bundle_id"`
-	Scene    string         `json:"scene"`   // speed | context | lowvram | creative | ""
-	Params   map[string]any `json:"params"`  // current form values for audit
+	Scene    string         `json:"scene"`  // speed | context | lowvram | creative | ""
+	Params   map[string]any `json:"params"` // current form values for audit
 }
 
 // handleRecommend runs the auto-config engine for a bundle and audits the
@@ -584,14 +779,14 @@ func (a *App) handleRecommend(w http.ResponseWriter, r *http.Request) {
 		"recommendation": rec,
 		"audit":          audit,
 		"model_spec": map[string]any{
-			"file_size_mb":    spec.FileSizeMB,
-			"block_count":     spec.BlockCount,
-			"context_length":  spec.ContextLength,
-			"head_count_kv":   spec.HeadCountKV,
+			"file_size_mb":     spec.FileSizeMB,
+			"block_count":      spec.BlockCount,
+			"context_length":   spec.ContextLength,
+			"head_count_kv":    spec.HeadCountKV,
 			"embedding_length": spec.EmbeddingLength,
-			"architecture":    spec.Architecture,
-			"is_moe":          spec.IsMoE,
-			"num_experts":     spec.NumExperts,
+			"architecture":     spec.Architecture,
+			"is_moe":           spec.IsMoE,
+			"num_experts":      spec.NumExperts,
 		},
 	})
 }
@@ -599,7 +794,8 @@ func (a *App) handleRecommend(w http.ResponseWriter, r *http.Request) {
 // modelSpecFromBundle converts a bundle into the config engine's ModelSpec.
 func modelSpecFromBundle(b *bundle.Bundle) config.ModelSpec {
 	spec := config.ModelSpec{
-		FileSizeMB: b.BaseModel.FileSizeMB,
+		FileSizeMB:   b.BaseModel.FileSizeMB,
+		MMProjSizeMB: b.MMProj.FileSizeMB,
 	}
 	if m := b.BaseModel.Metadata; m != nil {
 		spec.BlockCount = m.BlockCount
@@ -636,9 +832,9 @@ func (a *App) handleCache(w http.ResponseWriter, r *http.Request) {
 
 // cacheOpRequest is the body of cache mutation endpoints.
 type cacheOpRequest struct {
-	Path     string `json:"path"`
-	RepoID   string `json:"repo_id"`
-	DestDir  string `json:"dest_dir"`
+	Path    string `json:"path"`
+	RepoID  string `json:"repo_id"`
+	DestDir string `json:"dest_dir"`
 }
 
 // handleCacheDelete removes a cached entry (POST /api/cache/delete).
@@ -994,15 +1190,15 @@ func (a *App) handleInsights(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.writeJSON(w, http.StatusOK, map[string]any{
-		"total_tokens":      totalTokens,
-		"total_sessions":    totalSessions,
-		"today_sessions":    todaySessions,
-		"crashes":           crashes,
-		"success_rate":      successRate,
-		"avg_tps":           avgTPS,
-		"models":            models,
-		"days":              days,
-		"generated_at":      time.Now().Format(time.RFC3339),
+		"total_tokens":   totalTokens,
+		"total_sessions": totalSessions,
+		"today_sessions": todaySessions,
+		"crashes":        crashes,
+		"success_rate":   successRate,
+		"avg_tps":        avgTPS,
+		"models":         models,
+		"days":           days,
+		"generated_at":   time.Now().Format(time.RFC3339),
 	})
 }
 
@@ -1046,6 +1242,106 @@ func (a *App) handleMCPDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.writeJSON(w, http.StatusNoContent, nil)
+}
+
+// mcpCursorJSON converts a bundle's bound MCP servers into a Cursor-format JSON
+// string ready for --mcp-servers-json (empty when none are enabled).
+func (a *App) mcpCursorJSON(b *bundle.Bundle) (string, error) {
+	if len(b.MCPServers) == 0 || a.mcp == nil {
+		return "", nil
+	}
+	cfg, err := a.mcp.ToCursorJSON(b.MCPServers)
+	if err != nil {
+		log.Printf("mcp: failed to build config for %s: %v", b.ID, err)
+		return "", err
+	}
+	return cfg, nil
+}
+
+// handleMCPStatus reports per-server health (command resolvable on PATH).
+func (a *App) handleMCPStatus(w http.ResponseWriter, r *http.Request) {
+	servers := a.mcp.List()
+	items := make([]map[string]any, 0, len(servers))
+	for _, s := range servers {
+		_, err := exec.LookPath(s.Command)
+		items = append(items, map[string]any{
+			"id": s.ID, "name": s.Name, "command": s.Command, "args": s.Args,
+			"enabled": s.Enabled, "healthy": err == nil,
+		})
+	}
+	a.writeJSON(w, http.StatusOK, items)
+}
+
+// handleMCPCheckEnv reports availability of common runtimes used by templates.
+func (a *App) handleMCPCheckEnv(w http.ResponseWriter, r *http.Request) {
+	result := map[string]bool{}
+	for _, cmd := range []string{"node", "npx", "python", "docker", "git", "uvx"} {
+		_, err := exec.LookPath(cmd)
+		result[cmd] = err == nil
+	}
+	a.writeJSON(w, http.StatusOK, result)
+}
+
+// handleMCPTest spawns a command briefly to verify it can start, then kills it.
+func (a *App) handleMCPTest(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Command string            `json:"command"`
+		Args    []string          `json:"args"`
+		Env     map[string]string `json:"env"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		a.writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": err.Error()})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, req.Command, req.Args...)
+	cmd.Env = os.Environ()
+	for k, v := range req.Env {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
+	if err := cmd.Start(); err != nil {
+		a.writeJSON(w, http.StatusOK, map[string]any{"ok": false, "message": err.Error()})
+		return
+	}
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
+	a.writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "命令可执行，环境正常"})
+}
+
+// MCPTemplate describes a one-click MCP server preset (data/mcp_templates.json).
+type MCPTemplate struct {
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	Description  string   `json:"description"`
+	Command      string   `json:"command"`
+	Args         []string `json:"args"`
+	RequiresPath bool     `json:"requires_path"`
+	RequiresEnv  []string `json:"requires_env"`
+	RequiresText *struct {
+		Label       string `json:"label"`
+		Placeholder string `json:"placeholder"`
+	} `json:"requires_text,omitempty"`
+	Recommended bool   `json:"recommended"`
+	Category    string `json:"category"`
+	Hint        string `json:"hint,omitempty"`
+}
+
+// handleMCPTemplates lists one-click templates from data/mcp_templates.json.
+func (a *App) handleMCPTemplates(w http.ResponseWriter, r *http.Request) {
+	path := filepath.Join(a.cfg.DataDir, "mcp_templates.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		a.writeJSON(w, http.StatusOK, []MCPTemplate{})
+		return
+	}
+	var templates []MCPTemplate
+	if err := json.Unmarshal(data, &templates); err != nil {
+		log.Printf("mcp: template parse error: %v", err)
+		a.writeJSON(w, http.StatusOK, []MCPTemplate{})
+		return
+	}
+	a.writeJSON(w, http.StatusOK, templates)
 }
 
 // handleFSList lists a directory for the built-in file browser
@@ -1201,12 +1497,25 @@ func (a *App) launch(bundleID string, port int, params map[string]any, allowSame
 	go func() {
 		defer pw.Close()
 		buf := make([]byte, 4096)
+		var pending []byte
 		for {
 			n, err := pr.Read(buf)
 			if n > 0 {
-				a.hub.PublishLog(sess.ID, "INFO", string(buf[:n]))
+				pending = append(pending, buf[:n]...)
+				for {
+					idx := bytes.IndexByte(pending, '\n')
+					if idx < 0 {
+						break
+					}
+					line := strings.TrimRight(string(pending[:idx]), "\r")
+					pending = pending[idx+1:]
+					a.handleServerLine(sess.ID, line)
+				}
 			}
 			if err != nil {
+				if len(pending) > 0 {
+					a.handleServerLine(sess.ID, strings.TrimSpace(string(pending)))
+				}
 				return
 			}
 		}
@@ -1332,20 +1641,286 @@ func (a *App) handleRestart(w http.ResponseWriter, r *http.Request) {
 
 // testRequest is the body of POST /api/test/batch.
 type testRequest struct {
-	BundleIDs []string `json:"bundle_ids"`
-	Prompt    string   `json:"prompt"`
-	MaxTokens int      `json:"max_tokens"`
+	BundleIDs []string       `json:"bundle_ids"`
+	Prompt    string         `json:"prompt"`
+	MaxTokens int            `json:"max_tokens"`
+	Params    map[string]any `json:"params"`  // 测试参数覆盖（ctx/GPU层/线程/温度等）
+	Repeats   int            `json:"repeats"` // 同一实例测量次数（0/1=单次）
+	Warmup    bool           `json:"warmup"`  // 测量前预热
+	Ctx       int            `json:"ctx"`     // 测试基础 ctx（0=默认 1024）
+}
+
+// ── 测试历史（持久化到 data/test_history.json）────────────────
+type TestHistoryItem struct {
+	Name   string  `json:"name"`
+	Label  string  `json:"label,omitempty"`
+	Status string  `json:"status"`
+	LoadMS int64   `json:"load_ms"`
+	TPS    float64 `json:"tps"`
+	Tokens int     `json:"tokens"`
+	Error  string  `json:"error,omitempty"`
+}
+
+type TestHistoryRecord struct {
+	ID        string            `json:"id"`
+	Time      string            `json:"time"`
+	Type      string            `json:"type"` // batch | sweep
+	Mode      string            `json:"mode,omitempty"`
+	Model     string            `json:"model,omitempty"` // 扫描的目标模型
+	Prompt    string            `json:"prompt"`
+	MaxTokens int               `json:"max_tokens"`
+	Summary   string            `json:"summary"`
+	Items     []TestHistoryItem `json:"items"`
+}
+
+// testCacheEntry is a persisted result for one (model, params) fingerprint.
+type testCacheEntry struct {
+	Key      string  `json:"key"`
+	TPS      float64 `json:"tps"`
+	Tokens   int     `json:"tokens"`
+	LoadMS   int64   `json:"load_ms"`
+	PromptPS float64 `json:"prompt_ps"`
+	PromptMS float64 `json:"prompt_ms"`
+	EvalMS   float64 `json:"eval_ms"`
+	Time     string  `json:"time"`
+}
+
+func (a *App) testCachePath() string { return filepath.Join(a.cfg.DataDir, "test_cache.json") }
+
+func (a *App) loadTestCache() {
+	data, err := os.ReadFile(a.testCachePath())
+	if err != nil {
+		return
+	}
+	var m map[string]testCacheEntry
+	if json.Unmarshal(data, &m) == nil && m != nil {
+		a.testCache = m
+	}
+}
+
+func (a *App) saveTestCache() {
+	a.mu.Lock()
+	m := make(map[string]testCacheEntry, len(a.testCache))
+	for k, v := range a.testCache {
+		m[k] = v
+	}
+	a.mu.Unlock()
+	data, _ := json.MarshalIndent(m, "", "  ")
+	_ = os.WriteFile(a.testCachePath(), data, 0644)
+}
+
+// fileFingerprint returns a stable identity (size+mtime) of a model file so a
+// changed model invalidates its cache entries.
+func (a *App) fileFingerprint(path string) string {
+	st, err := os.Stat(path)
+	if err != nil {
+		return "?"
+	}
+	return fmt.Sprintf("%d-%d", st.Size(), st.ModTime().Unix())
+}
+
+// testCacheKey builds the L2 fingerprint: model file identity + base ctx + all combo params.
+func (a *App) testCacheKey(bundleID, fp string, baseCtx int, ov map[string]any) string {
+	parts := []string{bundleID, fp, "ctx=" + strconv.Itoa(baseCtx)}
+	var ks []string
+	for k := range ov {
+		ks = append(ks, k)
+	}
+	sort.Strings(ks)
+	for _, k := range ks {
+		parts = append(parts, k+"="+fmt.Sprintf("%v", ov[k]))
+	}
+	return strings.Join(parts, "|")
+}
+
+func (a *App) testCacheGet(bundleID, fp string, baseCtx int, ov map[string]any) (sweepResult, bool) {
+	k := a.testCacheKey(bundleID, fp, baseCtx, ov)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	e, ok := a.testCache[k]
+	if !ok {
+		return sweepResult{}, false
+	}
+	return sweepResult{
+		Status: "ok", TPS: e.TPS, Tokens: e.Tokens, LoadMS: e.LoadMS,
+		PromptPS: e.PromptPS, PromptMS: e.PromptMS, EvalMS: e.EvalMS, Cached: true,
+	}, true
+}
+
+func (a *App) testCachePut(bundleID, fp string, baseCtx int, ov map[string]any, res testResult) {
+	if res.Status != "ok" {
+		return
+	}
+	k := a.testCacheKey(bundleID, fp, baseCtx, ov)
+	a.mu.Lock()
+	a.testCache[k] = testCacheEntry{
+		Key: k, TPS: res.TPS, Tokens: res.Tokens, LoadMS: res.LoadMS,
+		PromptPS: res.PromptPS, PromptMS: res.PromptMS, EvalMS: res.EvalMS,
+		Time: time.Now().Format("2006-01-02 15:04:05"),
+	}
+	a.mu.Unlock()
+	a.saveTestCache()
+}
+
+func (a *App) loadTestHistory() {
+	data, err := os.ReadFile(filepath.Join(a.cfg.DataDir, "test_history.json"))
+	if err != nil {
+		return
+	}
+	var list []TestHistoryRecord
+	if json.Unmarshal(data, &list) == nil {
+		a.testHistory = list
+	}
+}
+
+func (a *App) saveTestHistory(list []TestHistoryRecord) {
+	data, _ := json.MarshalIndent(list, "", "  ")
+	_ = os.WriteFile(filepath.Join(a.cfg.DataDir, "test_history.json"), data, 0644)
+}
+
+func (a *App) appendTestHistory(rec TestHistoryRecord) {
+	a.mu.Lock()
+	a.testHistory = append([]TestHistoryRecord{rec}, a.testHistory...)
+	if len(a.testHistory) > 50 {
+		a.testHistory = a.testHistory[:50]
+	}
+	copyList := make([]TestHistoryRecord, len(a.testHistory))
+	copy(copyList, a.testHistory)
+	a.mu.Unlock()
+	a.saveTestHistory(copyList)
+}
+
+func (a *App) bundleName(id string) string {
+	if b, ok := a.bundles.Get(id); ok {
+		return b.Name
+	}
+	return id
+}
+
+// recordBatchHistory stores a summary of a batch test run.
+func (a *App) recordBatchHistory(req testRequest, results []testResult) {
+	items := make([]TestHistoryItem, 0, len(results))
+	bestTPS, bestName, okCount := 0.0, "", 0
+	for _, r := range results {
+		items = append(items, TestHistoryItem{Name: r.Name, Status: r.Status, LoadMS: r.LoadMS, TPS: r.TPS, Tokens: r.Tokens, Error: r.Error})
+		if r.Status == "ok" && r.TPS > bestTPS {
+			bestTPS, bestName = r.TPS, r.Name
+		}
+		if r.Status == "ok" {
+			okCount++
+		}
+	}
+	summary := fmt.Sprintf("%d 个模型 · ✅ %d 通过", len(results), okCount)
+	if bestName != "" {
+		summary += fmt.Sprintf(" · 最快 %s %.1f tok/s", bestName, bestTPS)
+	}
+	a.appendTestHistory(TestHistoryRecord{
+		ID:        "h" + strconv.FormatInt(time.Now().UnixNano(), 36),
+		Time:      time.Now().Format("2006-01-02 15:04:05"),
+		Type:      "batch",
+		Prompt:    req.Prompt,
+		MaxTokens: req.MaxTokens,
+		Summary:   summary,
+		Items:     items,
+	})
+}
+
+// recordSweepHistory stores a summary of a parameter sweep run.
+func (a *App) recordSweepHistory(modelName string, req sweepRequest, mode string, results []sweepResult) {
+	items := make([]TestHistoryItem, 0, len(results))
+	bestTPS, bestLabel, okCount := 0.0, "", 0
+	for _, r := range results {
+		items = append(items, TestHistoryItem{Name: r.Label, Status: r.Status, LoadMS: r.LoadMS, TPS: r.TPS, Tokens: r.Tokens, Error: r.Error})
+		if r.Status == "ok" && r.TPS > bestTPS {
+			bestTPS, bestLabel = r.TPS, r.Label
+		}
+		if r.Status == "ok" {
+			okCount++
+		}
+	}
+	summary := fmt.Sprintf("共测 %d 次 · ✅ %d 成功", len(results), okCount)
+	if bestLabel != "" {
+		summary += fmt.Sprintf(" · 最佳 %s（%.1f tok/s）", bestLabel, bestTPS)
+	}
+	a.appendTestHistory(TestHistoryRecord{
+		ID:        "h" + strconv.FormatInt(time.Now().UnixNano(), 36),
+		Time:      time.Now().Format("2006-01-02 15:04:05"),
+		Type:      "sweep",
+		Mode:      mode,
+		Model:     modelName,
+		Prompt:    req.Prompt,
+		MaxTokens: req.MaxTokens,
+		Summary:   summary,
+		Items:     items,
+	})
+}
+
+// testJobCancelled reports whether a test job has been asked to abort.
+func (a *App) testJobCancelled(jobID string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.testCancel[jobID]
+}
+
+// handleTestCancel marks a running test/sweep job for cancellation.
+func (a *App) handleTestCancel(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		JobID string `json:"job_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	a.mu.Lock()
+	a.testCancel[body.JobID] = true
+	a.mu.Unlock()
+	a.writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleTestHistory returns the persisted test history (newest first).
+func (a *App) handleTestHistory(w http.ResponseWriter, r *http.Request) {
+	a.mu.Lock()
+	list := make([]TestHistoryRecord, len(a.testHistory))
+	copy(list, a.testHistory)
+	a.mu.Unlock()
+	a.writeJSON(w, http.StatusOK, map[string]any{"records": list})
+}
+
+// handleTestHistoryClear wipes all persisted test history.
+func (a *App) handleTestHistoryClear(w http.ResponseWriter, r *http.Request) {
+	a.mu.Lock()
+	a.testHistory = nil
+	a.mu.Unlock()
+	a.saveTestHistory(nil)
+	a.writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // testResult is one model's batch-test outcome.
 type testResult struct {
-	BundleID string  `json:"bundle_id"`
-	Name     string  `json:"name"`
-	Status   string  `json:"status"` // ok | fail
-	LoadMS   int64   `json:"load_ms"`
-	TPS      float64 `json:"tps"`
-	Tokens   int     `json:"tokens"`
-	Error    string  `json:"error,omitempty"`
+	BundleID string       `json:"bundle_id"`
+	Name     string       `json:"name"`
+	Status   string       `json:"status"` // ok | fail
+	LoadMS   int64        `json:"load_ms"`
+	TPS      float64      `json:"tps"`
+	Tokens   int          `json:"tokens"`
+	PromptPS float64      `json:"prompt_ps,omitempty"` // prompt 吞吐 tok/s
+	PromptMS float64      `json:"prompt_ms,omitempty"` // 首 token（prompt eval）耗时 ms
+	EvalMS   float64      `json:"eval_ms,omitempty"`   // eval 总耗时 ms
+	Repeats  int          `json:"repeats,omitempty"`   // 实际测量次数
+	VRAMGB   float64      `json:"vram_gb,omitempty"`   // 该配置估算显存（GB，用于帕累托/雷达图）
+	Audit    []paramAudit `json:"audit,omitempty"`     // 参数审计：请求 vs 实际生效
+	Error    string       `json:"error,omitempty"`
+}
+
+// paramAudit compares a requested parameter with the value that actually took
+// effect in the launched server (parsed back from the real CLI args).
+type paramAudit struct {
+	Key       string `json:"key"`
+	Label     string `json:"label"`
+	Requested string `json:"requested"`
+	Effective string `json:"effective"`
+	Same      bool   `json:"same"`
+	Note      string `json:"note,omitempty"`
 }
 
 // handleTestBatch launches each selected model in turn, sends a short test
@@ -1371,32 +1946,347 @@ func (a *App) handleTestBatch(w http.ResponseWriter, r *http.Request) {
 	a.writeJSON(w, http.StatusOK, map[string]any{"job_id": jobID})
 
 	go func() {
-		results := make([]testResult, 0, len(req.BundleIDs))
-		for i, bid := range req.BundleIDs {
-			res := a.runOneTest(bid, req.Prompt, req.MaxTokens)
-			results = append(results, res)
-			data, _ := json.Marshal(map[string]any{
-				"type": "test_progress", "job_id": jobID,
-				"index": i, "total": len(req.BundleIDs),
-				"bundle_id": res.BundleID, "name": res.Name, "status": res.Status,
-				"load_ms": res.LoadMS, "tps": res.TPS, "tokens": res.Tokens, "error": res.Error,
-			})
-			a.hub.Broadcast(data)
+		defer func() {
+			a.mu.Lock()
+			delete(a.testCancel, jobID)
+			a.mu.Unlock()
+		}()
+		opts := &testRunOpts{Repeats: req.Repeats, Warmup: req.Warmup, Ctx: req.Ctx}
+		// 显存感知并行：估算各模型显存，按可用显存贪心分批，组内并行、组间串行
+		groups := a.parallelGroups(req.BundleIDs, opts)
+		results := make([]testResult, len(req.BundleIDs))
+		for _, g := range groups {
+			if a.testJobCancelled(jobID) {
+				break
+			}
+			var wg sync.WaitGroup
+			for _, idx := range g {
+				wg.Add(1)
+				go func(idx int) {
+					defer wg.Done()
+					bid := req.BundleIDs[idx]
+					// 每个 goroutine 独立的阶段回调（避免共享 opts 竞态）
+					goOpts := *opts
+					goOpts.OnStage = func(stage string) {
+						data, _ := json.Marshal(map[string]any{
+							"type": "test_progress", "job_id": jobID, "stage": stage,
+							"index": idx, "total": len(req.BundleIDs), "bundle_id": bid,
+						})
+						a.hub.Broadcast(data)
+					}
+					res := a.runOneTest(bid, req.Prompt, req.MaxTokens, req.Params, &goOpts,
+						func() bool { return a.testJobCancelled(jobID) })
+					results[idx] = res
+					data, _ := json.Marshal(map[string]any{
+						"type": "test_progress", "job_id": jobID,
+						"index": idx, "total": len(req.BundleIDs),
+						"bundle_id": res.BundleID, "name": res.Name, "status": res.Status,
+						"load_ms": res.LoadMS, "tps": res.TPS, "tokens": res.Tokens, "error": res.Error,
+						"vram_gb": res.VRAMGB, "audit": res.Audit,
+					})
+					a.hub.Broadcast(data)
+				}(idx)
+			}
+			wg.Wait()
 		}
-		done, _ := json.Marshal(map[string]any{"type": "test_done", "job_id": jobID, "results": results})
+		// 汇总（跳过因取消未测的）
+		final := make([]testResult, 0, len(req.BundleIDs))
+		for _, r := range results {
+			if r.BundleID != "" {
+				final = append(final, r)
+			}
+		}
+		a.recordBatchHistory(req, final)
+		done, _ := json.Marshal(map[string]any{
+			"type": "test_done", "job_id": jobID, "results": final,
+			"cancelled": a.testJobCancelled(jobID),
+		})
 		a.hub.Broadcast(done)
 	}()
 }
 
+// modelSpecFor builds a config.ModelSpec for VRAM estimation from a bundle.
+func (a *App) modelSpecFor(b *bundle.Bundle) config.ModelSpec {
+	spec := config.ModelSpec{
+		FileSizeMB:   b.BaseModel.FileSizeMB,
+		MMProjSizeMB: b.MMProj.FileSizeMB,
+	}
+	if m := b.BaseModel.Metadata; m != nil {
+		spec.BlockCount = m.BlockCount
+		spec.ContextLength = m.ContextLength
+		spec.HeadCountKV = m.HeadCountKV
+		spec.EmbeddingLength = m.EmbeddingLength
+		spec.Architecture = m.Architecture
+		spec.NumExperts = m.NumExperts
+		spec.IsMoE = m.IsMoE()
+	}
+	return spec
+}
+
+// modelVRAMGB estimates a bundle's GPU memory (GB) under the test conditions.
+func (a *App) modelVRAMGB(bundleID string, opts *testRunOpts) float64 {
+	b, ok := a.bundles.Get(bundleID)
+	if !ok {
+		return 0
+	}
+	ngl := b.DefaultParams.NGPULayers
+	ctx := 1024
+	if opts != nil && opts.Ctx > 0 {
+		ctx = opts.Ctx
+	}
+	return config.EstimateVRAMEx(a.modelSpecFor(b), ngl, ctx, a.hw, "f16", "f16", false)
+}
+
+// parallelGroups splits model indexes into batches that fit the free VRAM
+// budget (greedy), so models within one batch test concurrently.
+func (a *App) parallelGroups(ids []string, opts *testRunOpts) [][]int {
+	budget := 0.0
+	if a.hw != nil && a.hw.FreeVRAMMB > 0 {
+		budget = float64(a.hw.FreeVRAMMB) / 1024.0 * 0.8
+	}
+	type item struct {
+		idx int
+		v   float64
+	}
+	var items []item
+	for i, id := range ids {
+		items = append(items, item{idx: i, v: a.modelVRAMGB(id, opts)})
+	}
+	var groups [][]int
+	var cur []int
+	curSum := 0.0
+	for _, it := range items {
+		if budget <= 0 || it.v <= 0 {
+			// 无法估算显存 → 保守：单个一组（串行）
+			groups = append(groups, []int{it.idx})
+			continue
+		}
+		if len(cur) > 0 && curSum+it.v > budget {
+			groups = append(groups, cur)
+			cur = nil
+			curSum = 0
+		}
+		cur = append(cur, it.idx)
+		curSum += it.v
+	}
+	if len(cur) > 0 {
+		groups = append(groups, cur)
+	}
+	return groups
+}
+
+// testRunOpts tunes how a single test run is measured.
+type testRunOpts struct {
+	Repeats int  // 同一实例内测量次数（0/1=单次；>1 取平均，更稳）
+	Warmup  bool // 正式测量前先发一次小请求预热（首请求通常偏慢）
+	Ctx     int  // 测试基础 ctx（0=默认 1024）
+	// OnStage 上报 6 阶段状态机（validating→auditing→warming_up→benchmarking→cleaning）。
+	// 调用方（batch/sweep）把它接到 WebSocket 广播上。
+	OnStage func(stage string)
+}
+
+// chatTiming captures per-request timings reported by llama-server.
+type chatTiming struct {
+	TPS      float64 // 生成吞吐 predicted_per_second
+	Tokens   int     // completion_tokens
+	PromptPS float64 // prompt 吞吐 prompt_per_second
+	PromptMS float64 // 首 token（prompt eval）耗时 ms
+	EvalMS   float64 // eval 总耗时 ms
+}
+
+// flagKeyIndex maps every CLI flag (long & short) back to its registry key.
+func (a *App) flagKeyIndex() map[string]string {
+	m := make(map[string]string, 420)
+	for _, d := range a.registry.All() {
+		if d.LongFlag != "" {
+			m[d.LongFlag] = d.Key
+		}
+		if d.Flag != "" {
+			m[d.Flag] = d.Key
+		}
+	}
+	return m
+}
+
+// isNumericArg tells whether an arg like "-1" is a negative number (a value),
+// not a flag.
+func isNumericArg(s string) bool {
+	if len(s) < 2 || s[0] != '-' {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		c := s[i]
+		if c < '0' || c > '9' {
+			if c == '.' && i > 1 {
+				continue
+			}
+			return false
+		}
+	}
+	return true
+}
+
+// parseEffectiveArgs parses the real CLI args back into a registry-key map so
+// we can audit which requested parameters actually took effect.
+func parseEffectiveArgs(args []string, flagKeys map[string]string, reg *config.Registry) map[string]any {
+	eff := map[string]any{}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		var flag, inline string
+		if strings.HasPrefix(arg, "--") {
+			if eq := strings.Index(arg, "="); eq >= 0 {
+				flag, inline = arg[:eq], arg[eq+1:]
+			} else {
+				flag = arg
+			}
+		} else if strings.HasPrefix(arg, "-") && !isNumericArg(arg) {
+			flag = arg
+		} else {
+			continue
+		}
+		key, ok := flagKeys[flag]
+		if !ok {
+			continue
+		}
+		pd, _ := reg.Get(key)
+		if inline != "" {
+			eff[key] = inline
+		} else if pd != nil && !pd.RequiresValue {
+			eff[key] = true
+		} else if i+1 < len(args) {
+			eff[key] = args[i+1]
+			i++
+		}
+	}
+	return eff
+}
+
+// fmtParamVal renders a requested/effective value for the audit table.
+func fmtParamVal(v any) string {
+	switch t := v.(type) {
+	case bool:
+		if t {
+			return "on"
+		}
+		return "off"
+	case float64:
+		return strconv.FormatFloat(t, 'f', -1, 64)
+	case float32:
+		return strconv.FormatFloat(float64(t), 'f', -1, 32)
+	case nil:
+		return ""
+	default:
+		return fmt.Sprint(v)
+	}
+}
+
+// auditParams compares the requested params against what actually took effect
+// (parsed back from the real CLI args) so the user can verify a scan really
+// applied (e.g. --ctx-size / --n-gpu-layers were honored).
+func (a *App) auditParams(req map[string]any, args []string) []paramAudit {
+	flagKeys := a.flagKeyIndex()
+	eff := parseEffectiveArgs(args, flagKeys, a.registry)
+	// 跳过与测量无关的固定项
+	skip := map[string]bool{"model": true, "port": true, "host": true, "metrics": true, "mmproj": true, "api_key": true}
+	keys := make([]string, 0, len(req))
+	for k := range req {
+		if skip[k] {
+			continue
+		}
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]paramAudit, 0, len(keys))
+	for _, k := range keys {
+		rq := fmtParamVal(req[k])
+		ev, ok := eff[k]
+		effStr := ""
+		if ok {
+			effStr = fmtParamVal(ev)
+		}
+		pa := paramAudit{Key: k, Requested: rq, Effective: effStr, Same: ok && effStr == rq}
+		if pd, ok := a.registry.Get(k); ok {
+			pa.Label = pd.Label
+		}
+		if !ok {
+			pa.Note = "未在命令行中生效（被忽略或模型默认覆盖）"
+		} else if pa.Same {
+			pa.Note = "已生效"
+		} else {
+			pa.Note = "实际值被调整（自动合并）"
+		}
+		out = append(out, pa)
+	}
+	return out
+}
+
+// paramsVRAMGB estimates VRAM (GB) for a merged params map.
+func (a *App) paramsVRAMGB(bundleID string, params map[string]any) float64 {
+	b, ok := a.bundles.Get(bundleID)
+	if !ok {
+		return 0
+	}
+	ngl := b.DefaultParams.NGPULayers
+	if v, ok := params["n_gpu_layers"].(int); ok {
+		ngl = v
+	}
+	ctx := 1024
+	if v, ok := params["ctx_size"].(int); ok {
+		ctx = v
+	}
+	kvK, kvV := "f16", "f16"
+	if v, ok := params["cache_type_k"].(string); ok {
+		kvK = v
+	}
+	if v, ok := params["cache_type_v"].(string); ok {
+		kvV = v
+	}
+	mmprojCPU := false
+	if v, ok := params["no_mmproj_offload"].(bool); ok {
+		mmprojCPU = v
+	}
+	return config.EstimateVRAMEx(a.modelSpecFor(b), ngl, ctx, a.hw, kvK, kvV, mmprojCPU)
+}
+
+// comboVRAMGB estimates VRAM (GB) for one sweep override map (帕累托图 X 轴).
+func (a *App) comboVRAMGB(bundleID string, baseCtx int, ov map[string]any) float64 {
+	b, ok := a.bundles.Get(bundleID)
+	if !ok {
+		return 0
+	}
+	ngl := b.DefaultParams.NGPULayers
+	if v, ok := ov["n_gpu_layers"].(int); ok {
+		ngl = v
+	}
+	ctx := baseCtx
+	if v, ok := ov["ctx_size"].(int); ok {
+		ctx = v
+	}
+	kvK, kvV := "f16", "f16"
+	if v, ok := ov["cache_type_k"].(string); ok {
+		kvK = v
+	}
+	if v, ok := ov["cache_type_v"].(string); ok {
+		kvV = v
+	}
+	mmprojCPU := false
+	if v, ok := ov["no_mmproj_offload"].(bool); ok {
+		mmprojCPU = v
+	}
+	return config.EstimateVRAMEx(a.modelSpecFor(b), ngl, ctx, a.hw, kvK, kvV, mmprojCPU)
+}
+
 // runOneTest loads a model, waits for health, sends a short chat and stops it.
-func (a *App) runOneTest(bundleID, prompt string, maxTokens int) testResult {
-	return a.runOneTestCore(bundleID, prompt, maxTokens, nil)
+func (a *App) runOneTest(bundleID, prompt string, maxTokens int, overrides map[string]any, opts *testRunOpts, isCancelled func() bool) testResult {
+	return a.runOneTestCore(bundleID, prompt, maxTokens, overrides, opts, isCancelled)
 }
 
 // runOneTestCore is the shared test runner. overrides are applied on top of
 // the standard test parameter set (used by both model batch tests and the
-// parameter sweep so both measure under identical conditions).
-func (a *App) runOneTestCore(bundleID, prompt string, maxTokens int, overrides map[string]any) testResult {
+// parameter sweep so both measure under identical conditions). opts tunes
+// repeat/warmup measurement. isCancelled is polled during the (potentially
+// long) model-load wait so a user can abort.
+func (a *App) runOneTestCore(bundleID, prompt string, maxTokens int, overrides map[string]any, opts *testRunOpts, isCancelled func() bool) testResult {
 	res := testResult{BundleID: bundleID}
 	b, ok := a.bundles.Get(bundleID)
 	if !ok {
@@ -1405,17 +2295,28 @@ func (a *App) runOneTestCore(bundleID, prompt string, maxTokens int, overrides m
 		return res
 	}
 	res.Name = b.Name
+	// 6 阶段状态机：validating → auditing → warming_up → benchmarking → cleaning
+	stage := func(s string) {
+		if opts != nil && opts.OnStage != nil {
+			opts.OnStage(s)
+		}
+	}
+	stage("validating")
 	port := a.findFreePort(9300)
+	baseCtx := 1024
+	if opts != nil && opts.Ctx > 0 {
+		baseCtx = opts.Ctx
+	}
 	params := map[string]any{
-		"ctx_size":      1024,
-		"predict":       maxTokens,
-		"temperature":   0.1,
-		"n_gpu_layers":  b.DefaultParams.NGPULayers,
-		"flash_attn":    "on",
-		"load_mode":     "mmap",
-		"threads":       0,
-		"cache_type_k":  "f16",
-		"cache_type_v":  "f16",
+		"ctx_size":     baseCtx,
+		"predict":      maxTokens,
+		"temperature":  0.1,
+		"n_gpu_layers": b.DefaultParams.NGPULayers,
+		"flash_attn":   "on",
+		"load_mode":    "mmap",
+		"threads":      0,
+		"cache_type_k": "f16",
+		"cache_type_v": "f16",
 	}
 	for k, v := range overrides {
 		if v == nil {
@@ -1431,11 +2332,36 @@ func (a *App) runOneTestCore(bundleID, prompt string, maxTokens int, overrides m
 		res.Error = err.Error()
 		return res
 	}
+	// 资源兜底：无论成功/失败/取消，最终都确保回收进程并清除 OOM 标志与端口占用
+	defer func() {
+		a.stopRunner(sess.ID)
+		a.testPortMu.Lock()
+		delete(a.testPorts, port)
+		a.testPortMu.Unlock()
+		a.mu.Lock()
+		delete(a.testOOM, sess.ID)
+		a.mu.Unlock()
+	}()
+	// 参数审计：对比请求参数 vs 命令行实际生效参数（含模型默认合并）
+	stage("auditing")
+	res.VRAMGB = a.paramsVRAMGB(bundleID, params)
+	res.Audit = a.auditParams(params, sess.CmdlineArgs)
 	// Wait for /health (model loaded) with a generous timeout; abort if the
 	// process crashes meanwhile.
 	start := time.Now()
 	healthy := false
 	for {
+		if isCancelled != nil && isCancelled() {
+			res.Status = "fail"
+			res.Error = "测试已取消"
+			return res
+		}
+		// OOM 熔断：检测到显存不足立即中止
+		if a.testOOMHit(sess.ID) {
+			res.Status = "fail"
+			res.Error = "显存不足（CUDA out of memory）"
+			return res
+		}
 		if !a.isRunning(sess.ID) {
 			break
 		}
@@ -1459,16 +2385,51 @@ func (a *App) runOneTestCore(bundleID, prompt string, maxTokens int, overrides m
 		res.Error = "加载超时或进程退出（当前机器可能无法运行该模型）"
 		return res
 	}
-	tps, tokens, terr := a.testChat(port, prompt, maxTokens)
+	// 预热（可选）：首请求通常含 CUDA/KV 初始化开销，先发一次小请求
+	if opts != nil && opts.Warmup {
+		stage("warming_up")
+		_, _ = a.testChatTiming(port, "你好", 4)
+	}
+	// 正式测量：同一实例内重复 N 次取平均（不额外启动模型，只加推理时间）
+	stage("benchmarking")
+	repeats := 1
+	if opts != nil && opts.Repeats > 1 {
+		repeats = opts.Repeats
+	}
+	var sumTPS, sumPPS, sumPMS, sumEMS float64
+	var lastTokens int
+	okCount := 0
+	var lastErr error
+	for i := 0; i < repeats; i++ {
+		ct, terr := a.testChatTiming(port, prompt, maxTokens)
+		if terr != nil {
+			lastErr = terr
+			continue
+		}
+		sumTPS += ct.TPS
+		sumPPS += ct.PromptPS
+		sumPMS += ct.PromptMS
+		sumEMS += ct.EvalMS
+		lastTokens = ct.Tokens
+		okCount++
+	}
+	stage("cleaning")
 	a.stopRunner(sess.ID)
-	if terr != nil {
+	if okCount == 0 {
+		if lastErr == nil {
+			lastErr = fmt.Errorf("测量失败")
+		}
 		res.Status = "fail"
-		res.Error = terr.Error()
+		res.Error = lastErr.Error()
 		return res
 	}
 	res.Status = "ok"
-	res.TPS = tps
-	res.Tokens = tokens
+	res.TPS = sumTPS / float64(okCount)
+	res.Tokens = lastTokens
+	res.Repeats = okCount
+	res.PromptPS = sumPPS / float64(okCount)
+	res.PromptMS = sumPMS / float64(okCount)
+	res.EvalMS = sumEMS / float64(okCount)
 	return res
 }
 
@@ -1486,20 +2447,31 @@ type sweepRequest struct {
 	MaxTokens int             `json:"max_tokens"`
 	Mode      string          `json:"mode"` // exhaustive | greedy
 	Params    []sweepParamReq `json:"params"`
+	Repeats   int             `json:"repeats"`    // 同一实例测量次数
+	Warmup    bool            `json:"warmup"`     // 测量前预热
+	Ctx       int             `json:"ctx"`        // 测试基础 ctx（0=默认 1024）
+	MaxCombos int             `json:"max_combos"` // 最大测试组合数（0=不限制；防呆）
 }
 
 // sweepResult is one parameter-combination outcome.
 type sweepResult struct {
-	Combo  int     `json:"combo"`
-	Label  string  `json:"label"`  // e.g. "GPU层=0, ctx=512, 线程=8"
-	Step   string  `json:"step,omitempty"`  // greedy 模式：当前优化步骤
-	Fixed  string  `json:"fixed,omitempty"` // greedy 模式：固定参数摘要
-	IsBest bool    `json:"is_best,omitempty"`
-	Status string  `json:"status"` // ok | fail
-	LoadMS int64   `json:"load_ms"`
-	TPS    float64 `json:"tps"`
-	Tokens int     `json:"tokens"`
-	Error  string  `json:"error,omitempty"`
+	Combo    int          `json:"combo"`
+	Label    string       `json:"label"`           // e.g. "GPU层=0, ctx=512, 线程=8"
+	Step     string       `json:"step,omitempty"`  // greedy 模式：当前优化步骤
+	Fixed    string       `json:"fixed,omitempty"` // greedy 模式：固定参数摘要
+	IsBest   bool         `json:"is_best,omitempty"`
+	Status   string       `json:"status"` // ok | fail
+	LoadMS   int64        `json:"load_ms"`
+	TPS      float64      `json:"tps"`
+	Tokens   int          `json:"tokens"`
+	PromptPS float64      `json:"prompt_ps,omitempty"`
+	PromptMS float64      `json:"prompt_ms,omitempty"`
+	EvalMS   float64      `json:"eval_ms,omitempty"`
+	Repeats  int          `json:"repeats,omitempty"`
+	Cached   bool         `json:"cached,omitempty"`  // 该组合已测过，直接复用结果（未启动模型）
+	VRAMGB   float64      `json:"vram_gb,omitempty"` // 估算显存（GB，帕累托图 X 轴）
+	Audit    []paramAudit `json:"audit,omitempty"`   // 参数审计（仅真实测试时携带）
+	Error    string       `json:"error,omitempty"`
 }
 
 // sweepShort maps registry keys to compact labels used in result rows.
@@ -1510,7 +2482,7 @@ var sweepShort = map[string]string{
 	"cache_type_k": "K缓存", "cache_type_v": "V缓存",
 	"rope_scaling": "rope", "flash_attn": "FA", "parallel": "槽位",
 	"tensor_split": "tsplit",
-	"load_mode": "加载", "numa": "NUMA", "kv_unified": "统一KV",
+	"load_mode":    "加载", "numa": "NUMA", "kv_unified": "统一KV",
 	"cpu_moe": "MoE-CPU", "cache_ram": "缓存RAM", "ctx_checkpoints": "检查点",
 	"checkpoint_min_step": "检查点间隔",
 }
@@ -1661,17 +2633,62 @@ func (a *App) handleTestSweep(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	// 预算控制（防呆）：用户设定了最大测试组合数则截断，杜绝无限扫描
+	if req.MaxCombos > 0 && len(combos) > req.MaxCombos {
+		combos = combos[:req.MaxCombos]
+		labels = labels[:req.MaxCombos]
+	}
+	opts := &testRunOpts{Repeats: req.Repeats, Warmup: req.Warmup, Ctx: req.Ctx}
 	jobID := fmt.Sprintf("sweep_%d", time.Now().UnixNano())
 	a.writeJSON(w, http.StatusOK, map[string]any{"job_id": jobID, "total": len(combos)})
 
 	go func() {
+		defer func() {
+			a.mu.Lock()
+			delete(a.testCancel, jobID)
+			a.mu.Unlock()
+		}()
+		modelFP := ""
+		if b, ok := a.bundles.Get(req.ModelID); ok {
+			modelFP = a.fileFingerprint(b.BaseModel.Path)
+		}
+		baseCtx := 1024
+		if req.Ctx > 0 {
+			baseCtx = req.Ctx
+		}
+		opts.OnStage = func(stage string) {
+			data, _ := json.Marshal(map[string]any{
+				"type": "sweep_progress", "job_id": jobID, "stage": stage,
+			})
+			a.hub.Broadcast(data)
+		}
 		results := make([]sweepResult, 0, len(combos))
 		best, bestTPS := -1, 0.0
 		for i, ov := range combos {
-			res := a.runOneTestCore(req.ModelID, req.Prompt, req.MaxTokens, ov)
-			sr := sweepResult{
-				Combo: i, Label: labels[i], Status: res.Status,
-				LoadMS: res.LoadMS, TPS: res.TPS, Tokens: res.Tokens, Error: res.Error,
+			if a.testJobCancelled(jobID) {
+				break
+			}
+			var res testResult
+			sr := sweepResult{Combo: i, Label: labels[i], Status: "skip"}
+			sr.VRAMGB = a.comboVRAMGB(req.ModelID, baseCtx, ov)
+			if l2, ok := a.testCacheGet(req.ModelID, modelFP, baseCtx, ov); ok {
+				// L2 磁盘缓存命中（历史测过）→ 复用，不启动模型
+				sr = l2
+				sr.Combo = i
+				sr.Label = labels[i]
+				sr.VRAMGB = a.comboVRAMGB(req.ModelID, baseCtx, ov)
+				res = testResult{Status: "ok", TPS: l2.TPS, Tokens: l2.Tokens, LoadMS: l2.LoadMS,
+					PromptPS: l2.PromptPS, PromptMS: l2.PromptMS, EvalMS: l2.EvalMS}
+			} else {
+				res = a.runOneTestCore(req.ModelID, req.Prompt, req.MaxTokens, ov, opts,
+					func() bool { return a.testJobCancelled(jobID) })
+				sr = sweepResult{
+					Combo: i, Label: labels[i], Status: res.Status,
+					LoadMS: res.LoadMS, TPS: res.TPS, Tokens: res.Tokens, Error: res.Error,
+					PromptPS: res.PromptPS, PromptMS: res.PromptMS, EvalMS: res.EvalMS, Repeats: res.Repeats,
+					VRAMGB: res.VRAMGB, Audit: res.Audit,
+				}
+				a.testCachePut(req.ModelID, modelFP, baseCtx, ov, res)
 			}
 			if res.Status == "ok" && res.TPS > bestTPS {
 				bestTPS = res.TPS
@@ -1683,12 +2700,16 @@ func (a *App) handleTestSweep(w http.ResponseWriter, r *http.Request) {
 				"combo": i, "total": len(combos),
 				"label": sr.Label, "status": sr.Status,
 				"load_ms": sr.LoadMS, "tps": sr.TPS, "tokens": sr.Tokens, "error": sr.Error,
+				"prompt_ps": sr.PromptPS, "prompt_ms": sr.PromptMS, "eval_ms": sr.EvalMS, "repeats": sr.Repeats,
+				"cached": sr.Cached, "vram_gb": sr.VRAMGB, "audit": sr.Audit,
 			})
 			a.hub.Broadcast(data)
 		}
+		a.recordSweepHistory(a.bundleName(req.ModelID), req, "exhaustive", results)
 		doneMsg := map[string]any{
 			"type": "sweep_done", "job_id": jobID,
 			"results": results, "best": best,
+			"cancelled": a.testJobCancelled(jobID),
 		}
 		if best >= 0 && best < len(combos) && best < len(results) && results[best].Status == "ok" {
 			doneMsg["best_params"] = combos[best]
@@ -1696,7 +2717,7 @@ func (a *App) handleTestSweep(w http.ResponseWriter, r *http.Request) {
 				"mode": "exhaustive", "tps": results[best].TPS, "load_ms": results[best].LoadMS,
 				"tokens": results[best].Tokens, "ctx_size": sweepInt(combos[best], "ctx_size"),
 				"n_gpu_layers": sweepInt(combos[best], "n_gpu_layers"),
-				"max_tokens": req.MaxTokens, "prompt": req.Prompt,
+				"max_tokens":   req.MaxTokens, "prompt": req.Prompt,
 			}
 		}
 		done, _ := json.Marshal(doneMsg)
@@ -1704,18 +2725,53 @@ func (a *App) handleTestSweep(w http.ResponseWriter, r *http.Request) {
 	}()
 }
 
-// runGreedySweep optimizes parameters one at a time (coordinate descent): in
-// each round every swept parameter is tested against the current best of the
-// others, and the winner becomes the new best. This avoids the exponential
-// cartesian explosion of exhaustive mode while usually converging to a
-// near-optimal config in a few dozen tests.
-func (a *App) runGreedySweep(w http.ResponseWriter, req sweepRequest) {
-	type dim struct {
-		key, lbl string
-		vals     []any
-		strs     []string
+// sweepDim is one swept parameter with its cast candidate values (greedy 用).
+type sweepDim struct {
+	key, lbl string
+	vals     []any
+	strs     []string
+}
+
+// enumerateCombos iterates all cartesian combinations of dims (values already
+// cast), merged with fixed, skipping duplicates by keyFn.
+func (a *App) enumerateCombos(dims []sweepDim, fixed map[string]any, keyFn func(map[string]any) string, seen map[string]bool) []map[string]any {
+	var out []map[string]any
+	idx := make([]int, len(dims))
+	for {
+		ov := make(map[string]any, len(dims)+len(fixed))
+		for k, v := range fixed {
+			ov[k] = v
+		}
+		for i, d := range dims {
+			ov[d.key] = d.vals[idx[i]]
+		}
+		k := keyFn(ov)
+		if !seen[k] {
+			seen[k] = true
+			out = append(out, ov)
+		}
+		j := len(dims) - 1
+		for j >= 0 {
+			idx[j]++
+			if idx[j] < len(dims[j].vals) {
+				break
+			}
+			idx[j] = 0
+			j--
+		}
+		if j < 0 {
+			break
+		}
 	}
-	var dims []dim
+	return out
+}
+
+// runGreedySweep optimizes parameters as a whole (not one-at-a-time): it first
+// explores the parameter space with a stratified random sample, then refines
+// the best few starting points with coordinate descent (adopting only
+// improvements above a threshold), and finally confirms the global best.
+func (a *App) runGreedySweep(w http.ResponseWriter, req sweepRequest) {
+	var dims []sweepDim
 	fixed := map[string]any{}
 	var fixedStrs []string
 	for _, p := range req.Params {
@@ -1746,126 +2802,325 @@ func (a *App) runGreedySweep(w http.ResponseWriter, req sweepRequest) {
 			fixed[p.Key] = vals[0]
 			fixedStrs = append(fixedStrs, shortSweepLabel(p.Key)+"="+strs[0])
 		} else {
-			dims = append(dims, dim{key: p.Key, lbl: shortSweepLabel(p.Key), vals: vals, strs: strs})
+			dims = append(dims, sweepDim{key: p.Key, lbl: shortSweepLabel(p.Key), vals: vals, strs: strs})
 		}
 	}
 	if len(dims) == 0 {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "智能寻优需要至少一个参数填多个值"})
 		return
 	}
-	const rounds = 2
-	totalTests := 0
+	// 整体寻优算法参数：先全局探索再多起点精调，改进超过阈值才采纳
+	const (
+		exploreN      = 20   // 全局探索采样组合数（覆盖参数空间找好区域）
+		refineTopK    = 2    // 从探索结果取最优的 K 个起点做局部精调
+		refineRounds  = 2    // 每个起点最多精调轮数
+		improveThresh = 0.05 // 相对改进阈值：提升 <5% 不采纳（避免无意义微调）
+	)
+	// 估算测试总数（用于前端进度条；实际可能略少）
+	totalCombos := 1
+	maxDimVals := 0
 	for _, d := range dims {
-		totalTests += len(d.vals) * rounds
+		totalCombos *= len(d.vals)
+		if len(d.vals) > maxDimVals {
+			maxDimVals = len(d.vals)
+		}
 	}
+	explore := exploreN
+	if totalCombos < explore {
+		explore = totalCombos
+	}
+	totalTests := explore + refineTopK*refineRounds*maxDimVals*len(dims) + 2
 	jobID := fmt.Sprintf("sweep_%d", time.Now().UnixNano())
 	a.writeJSON(w, http.StatusOK, map[string]any{"job_id": jobID, "total": totalTests, "mode": "greedy"})
 
 	go func() {
-		best := make(map[string]any, len(dims))
-		bestStr := make(map[string]string, len(dims))
-		for _, d := range dims {
-			best[d.key] = d.vals[0]
-			bestStr[d.key] = d.strs[0]
+		defer func() {
+			a.mu.Lock()
+			delete(a.testCancel, jobID)
+			a.mu.Unlock()
+		}()
+		opts := &testRunOpts{Repeats: req.Repeats, Warmup: req.Warmup, Ctx: req.Ctx}
+		opts.OnStage = func(stage string) {
+			data, _ := json.Marshal(map[string]any{
+				"type": "sweep_progress", "job_id": jobID, "mode": "greedy", "stage": stage,
+			})
+			a.hub.Broadcast(data)
 		}
-		results := make([]sweepResult, 0, totalTests+1)
+		modelFP := ""
+		if b, ok := a.bundles.Get(req.ModelID); ok {
+			modelFP = a.fileFingerprint(b.BaseModel.Path)
+		}
+		baseCtx := 1024
+		if req.Ctx > 0 {
+			baseCtx = req.Ctx
+		}
+		results := make([]sweepResult, 0, totalTests)
 		combo := 0
-		for round := 1; round <= rounds; round++ {
-			improved := false
+
+		// 工具：合并 fixed 的基础参数副本
+		cloneBase := func() map[string]any {
+			ov := make(map[string]any, len(fixed)+len(dims))
+			for k, v := range fixed {
+				ov[k] = v
+			}
+			return ov
+		}
+		// 工具：参数组合 → 去重键（相同组合只测一次，其余复用缓存结果，避免重复测试浪费时间）
+		keyOf := func(ov map[string]any) string {
+			var ks []string
+			for k := range ov {
+				ks = append(ks, k)
+			}
+			sort.Strings(ks)
+			parts := make([]string, 0, len(ks))
+			for _, k := range ks {
+				parts = append(parts, k+"="+fmt.Sprintf("%v", ov[k]))
+			}
+			return strings.Join(parts, "|")
+		}
+		resultCache := map[string]sweepResult{} // 已测组合缓存
+		testedCount := 0                        // 真实启动模型的次数（其余为缓存复用）
+		var bestGlobal map[string]any           // 全局最优配置
+		bestGlobalTPS := 0.0
+		abortEarly := false       // 预算/连续无提升 → 提前终止
+		noImproveStreak := 0      // 连续真实测试无提升计数
+		const noImproveLimit = 10 // 连续 N 次无提升提前终止（防呆）
+		// 工具：参数组合 → 可读 label
+		comboLabel := func(ov map[string]any) string {
+			parts := make([]string, 0, len(fixedStrs)+len(dims))
+			parts = append(parts, fixedStrs...)
+			keys := make([]string, 0, len(dims))
 			for _, d := range dims {
-				bestTPS := -1.0
-				var winVal any
-				winStr := ""
-				for i, v := range d.vals {
-					ov := make(map[string]any, len(best)+len(fixed))
-					for k, vv := range fixed {
-						ov[k] = vv
+				keys = append(keys, d.key)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				for _, d := range dims {
+					if d.key != k {
+						continue
 					}
-					for k, vv := range best {
-						ov[k] = vv
+					for i, v := range d.vals {
+						if fmt.Sprintf("%v", v) == fmt.Sprintf("%v", ov[k]) {
+							parts = append(parts, d.lbl+"="+d.strs[i])
+							break
+						}
 					}
-					ov[d.key] = v
-					res := a.runOneTestCore(req.ModelID, req.Prompt, req.MaxTokens, ov)
-					sr := sweepResult{
-						Combo: combo, Label: d.lbl + "=" + d.strs[i],
-						Step:   fmt.Sprintf("第%d轮 · %s", round, d.lbl),
-						Fixed:  strings.Join(fixedStrs, ", "),
-						Status: res.Status, LoadMS: res.LoadMS, TPS: res.TPS,
-						Tokens: res.Tokens, Error: res.Error,
-					}
-					if res.Status == "ok" && res.TPS > bestTPS {
-						bestTPS = res.TPS
-						winVal = v
-						winStr = d.strs[i]
-					}
-					results = append(results, sr)
-					data, _ := json.Marshal(map[string]any{
-						"type": "sweep_progress", "job_id": jobID, "mode": "greedy",
-						"combo": combo, "total": totalTests,
-						"label": sr.Label, "step": sr.Step, "fixed": sr.Fixed,
-						"status": sr.Status, "load_ms": sr.LoadMS,
-						"tps": sr.TPS, "tokens": sr.Tokens, "error": sr.Error,
-					})
-					a.hub.Broadcast(data)
-					combo++
-				}
-				if winStr != "" && winStr != bestStr[d.key] {
-					best[d.key] = winVal
-					bestStr[d.key] = winStr
-					improved = true
+					break
 				}
 			}
-			if !improved {
+			return strings.Join(parts, ", ")
+		}
+		// 工具：运行一次并广播进度（相同组合自动复用缓存，不重复启动模型）
+		runOne := func(ov map[string]any, step string) (testResult, sweepResult) {
+			k := keyOf(ov)
+			var sr sweepResult
+			sr.VRAMGB = a.comboVRAMGB(req.ModelID, baseCtx, ov)
+			res := testResult{BundleID: req.ModelID, Name: a.bundleName(req.ModelID)}
+			if c, ok := resultCache[k]; ok {
+				// 该组合已测过 → 直接复用结果，不再启动模型
+				sr = c
+				sr.Cached = true
+				sr.Step = step
+				sr.Combo = combo
+				sr.Label = comboLabel(ov)
+				res = testResult{Status: sr.Status, TPS: sr.TPS, Tokens: sr.Tokens, LoadMS: sr.LoadMS,
+					PromptPS: sr.PromptPS, PromptMS: sr.PromptMS, EvalMS: sr.EvalMS, Repeats: sr.Repeats}
+			} else if l2, ok := a.testCacheGet(req.ModelID, modelFP, baseCtx, ov); ok {
+				// L2 磁盘缓存命中（历史测过）→ 复用，不启动模型
+				sr = l2
+				sr.Cached = true
+				sr.Step = step
+				sr.Combo = combo
+				sr.Label = comboLabel(ov)
+				sr.Fixed = strings.Join(fixedStrs, ", ")
+				res = testResult{Status: "ok", TPS: l2.TPS, Tokens: l2.Tokens, LoadMS: l2.LoadMS,
+					PromptPS: l2.PromptPS, PromptMS: l2.PromptMS, EvalMS: l2.EvalMS}
+				resultCache[k] = sr
+			} else if req.MaxCombos > 0 && testedCount >= req.MaxCombos {
+				// 预算硬上限：不启动新模型，标记跳过（防呆）
+				sr = sweepResult{Combo: combo, Label: comboLabel(ov), Step: step,
+					Fixed: strings.Join(fixedStrs, ", "), Status: "skip", Error: "已超出最大测试次数，跳过", Cached: true}
+			} else {
+				res = a.runOneTestCore(req.ModelID, req.Prompt, req.MaxTokens, ov, opts,
+					func() bool { return a.testJobCancelled(jobID) })
+				sr = sweepResult{
+					Combo: combo, Label: comboLabel(ov), Step: step,
+					Fixed:  strings.Join(fixedStrs, ", "),
+					Status: res.Status, LoadMS: res.LoadMS, TPS: res.TPS, Tokens: res.Tokens, Error: res.Error,
+					PromptPS: res.PromptPS, PromptMS: res.PromptMS, EvalMS: res.EvalMS, Repeats: res.Repeats,
+					VRAMGB: res.VRAMGB, Audit: res.Audit,
+				}
+				resultCache[k] = sr
+				testedCount++
+				a.testCachePut(req.ModelID, modelFP, baseCtx, ov, res)
+				// 全局最优跟踪 + 连续无提升提前终止（仅真实测试计数）
+				if res.Status == "ok" {
+					if res.TPS > bestGlobalTPS {
+						bestGlobalTPS = res.TPS
+						bestGlobal = ov
+						noImproveStreak = 0
+					} else {
+						noImproveStreak++
+						if noImproveStreak >= noImproveLimit {
+							abortEarly = true
+						}
+					}
+				}
+			}
+			results = append(results, sr)
+			data, _ := json.Marshal(map[string]any{
+				"type": "sweep_progress", "job_id": jobID, "mode": "greedy",
+				"combo": combo, "total": totalTests,
+				"label": sr.Label, "step": sr.Step, "fixed": sr.Fixed,
+				"status": sr.Status, "load_ms": sr.LoadMS,
+				"tps": sr.TPS, "tokens": sr.Tokens, "error": sr.Error,
+				"prompt_ps": sr.PromptPS, "prompt_ms": sr.PromptMS, "eval_ms": sr.EvalMS, "repeats": sr.Repeats,
+				"cached": sr.Cached, "vram_gb": sr.VRAMGB, "audit": sr.Audit,
+			})
+			a.hub.Broadcast(data)
+			combo++
+			return res, sr
+		}
+
+		// ── Phase 1：全局探索（分层随机采样覆盖参数空间）────────
+		type cand struct {
+			params map[string]any
+			tps    float64
+		}
+		var explored []cand
+		{
+			var sampled []map[string]any
+			seen := map[string]bool{}
+			add := func(ov map[string]any) {
+				k := keyOf(ov)
+				if !seen[k] {
+					seen[k] = true
+					sampled = append(sampled, ov)
+				}
+			}
+			if totalCombos <= explore {
+				// 组合不多 → 直接穷举全覆盖
+				sampled = a.enumerateCombos(dims, fixed, keyOf, seen)
+			} else {
+				// 分层：每个参数每个档位至少出现一次，再随机补充
+				for _, d := range dims {
+					for _, v := range d.vals {
+						ov := cloneBase()
+						for _, d2 := range dims {
+							if d2.key != d.key {
+								ov[d2.key] = d2.vals[rand.IntN(len(d2.vals))]
+							}
+						}
+						ov[d.key] = v
+						add(ov)
+					}
+				}
+				for len(sampled) < explore && len(seen) < totalCombos {
+					ov := cloneBase()
+					for _, d := range dims {
+						ov[d.key] = d.vals[rand.IntN(len(d.vals))]
+					}
+					add(ov)
+				}
+			}
+			for _, ov := range sampled {
+				if a.testJobCancelled(jobID) || abortEarly {
+					break
+				}
+				res, _ := runOne(ov, "🌐 全局探索")
+				if res.Status == "ok" {
+					explored = append(explored, cand{params: ov, tps: res.TPS})
+				}
+			}
+		}
+
+		// ── Phase 2：多起点局部精调（坐标下降 + 改进阈值）────────
+		sort.Slice(explored, func(i, j int) bool { return explored[i].tps > explored[j].tps })
+		if len(explored) > refineTopK {
+			explored = explored[:refineTopK]
+		}
+		for si, st := range explored {
+			if abortEarly {
 				break
 			}
+			cur := make(map[string]any, len(st.params))
+			for k, v := range st.params {
+				cur[k] = v
+			}
+			curTPS := st.tps
+			for round := 1; round <= refineRounds; round++ {
+				if a.testJobCancelled(jobID) || abortEarly {
+					break
+				}
+				improved := false
+				for _, d := range dims {
+					if a.testJobCancelled(jobID) || abortEarly {
+						break
+					}
+					bestInDim := curTPS
+					var winVal any
+					for i, v := range d.vals {
+						if abortEarly {
+							break
+						}
+						ov := make(map[string]any, len(cur))
+						for k, vv := range cur {
+							ov[k] = vv
+						}
+						ov[d.key] = v
+						res, _ := runOne(ov, fmt.Sprintf("🔍 精调起点%d · 第%d轮", si+1, round))
+						if res.Status == "ok" && res.TPS > bestInDim {
+							bestInDim = res.TPS
+							winVal = v
+						}
+						_ = i
+					}
+					// 整体寻优：相对提升超过阈值才采纳（避免单参数微小波动干扰）
+					if winVal != nil && bestInDim > curTPS*(1+improveThresh) {
+						cur[d.key] = winVal
+						curTPS = bestInDim
+						improved = true
+					}
+				}
+				if !improved {
+					break
+				}
+			}
+			if curTPS > bestGlobalTPS {
+				bestGlobalTPS = curTPS
+				bestGlobal = cur
+			}
 		}
-		// 最终配置确认（一次干净测量）
-		finalMap := make(map[string]any, len(best)+len(fixed))
-		for k, v := range fixed {
-			finalMap[k] = v
+
+		// ── Phase 3：最终确认（对全局最优配置做一次干净测量）────────
+		if bestGlobal == nil {
+			bestGlobal = cloneBase()
+			for _, d := range dims {
+				bestGlobal[d.key] = d.vals[0]
+			}
 		}
-		for k, v := range best {
-			finalMap[k] = v
+		var fres testResult
+		if a.testJobCancelled(jobID) {
+			fres = testResult{Status: "fail", Error: "测试已取消"}
+		} else {
+			fres, _ = runOne(bestGlobal, "🏁 最终配置")
 		}
-		fres := a.runOneTestCore(req.ModelID, req.Prompt, req.MaxTokens, finalMap)
-		parts := make([]string, 0, len(fixedStrs)+len(bestStr))
-		parts = append(parts, fixedStrs...)
-		keys := make([]string, 0, len(bestStr))
-		for k := range bestStr {
-			keys = append(keys, k)
+		if len(results) > 0 {
+			results[len(results)-1].IsBest = true
 		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			parts = append(parts, shortSweepLabel(k)+"="+bestStr[k])
-		}
-		finalLabel := strings.Join(parts, ", ")
-		fsr := sweepResult{
-			Combo: combo, Label: finalLabel, Step: "🏁 最终配置",
-			Fixed: strings.Join(fixedStrs, ", "), IsBest: true,
-			Status: fres.Status, LoadMS: fres.LoadMS, TPS: fres.TPS,
-			Tokens: fres.Tokens, Error: fres.Error,
-		}
-		results = append(results, fsr)
-		// 广播最终确认，前端将其渲染为独立步骤
-		fdata, _ := json.Marshal(map[string]any{
-			"type": "sweep_progress", "job_id": jobID, "mode": "greedy",
-			"combo": combo, "total": totalTests,
-			"label": finalLabel, "step": fsr.Step, "fixed": fsr.Fixed,
-			"status": fsr.Status, "load_ms": fsr.LoadMS,
-			"tps": fsr.TPS, "tokens": fsr.Tokens, "error": fsr.Error,
-		})
-		a.hub.Broadcast(fdata)
-		combo++
+		a.recordSweepHistory(a.bundleName(req.ModelID), req, "greedy", results)
 		done, _ := json.Marshal(map[string]any{
 			"type": "sweep_done", "job_id": jobID, "mode": "greedy",
 			"results": results, "total": combo,
-			"best_label": finalLabel, "best_tps": fres.TPS, "best_tokens": fres.Tokens,
-			"best_params": finalMap,
+			"tested":     testedCount, // 实际启动模型的组合数（其余为缓存复用）
+			"best_label": comboLabel(bestGlobal), "best_tps": fres.TPS, "best_tokens": fres.Tokens,
+			"best_params": bestGlobal,
+			"cancelled":   a.testJobCancelled(jobID),
 			"best_meta": map[string]any{
 				"mode": "greedy", "tps": fres.TPS, "load_ms": fres.LoadMS, "tokens": fres.Tokens,
-				"ctx_size": sweepInt(finalMap, "ctx_size"),
-				"n_gpu_layers": sweepInt(finalMap, "n_gpu_layers"),
-				"max_tokens": req.MaxTokens, "prompt": req.Prompt,
+				"ctx_size":     sweepInt(bestGlobal, "ctx_size"),
+				"n_gpu_layers": sweepInt(bestGlobal, "n_gpu_layers"),
+				"max_tokens":   req.MaxTokens, "prompt": req.Prompt,
 			},
 		})
 		a.hub.Broadcast(done)
@@ -1907,16 +3162,25 @@ func (a *App) stopRunner(id string) {
 
 // findFreePort returns the first free port starting at from.
 func (a *App) findFreePort(from int) int {
+	a.testPortMu.Lock()
+	defer a.testPortMu.Unlock()
+	if a.testPorts == nil {
+		a.testPorts = map[int]bool{}
+	}
 	for p := from; p < from+500; p++ {
+		if a.testPorts[p] {
+			continue
+		}
 		if _, used := a.sessions.PortInUse(p); !used {
+			a.testPorts[p] = true
 			return p
 		}
 	}
 	return from
 }
 
-// testChat sends one non-streaming chat completion and returns (tps, tokens).
-func (a *App) testChat(port int, prompt string, maxTokens int) (float64, int, error) {
+// testChatTiming sends one non-streaming chat completion and returns timings.
+func (a *App) testChatTiming(port int, prompt string, maxTokens int) (chatTiming, error) {
 	body, _ := json.Marshal(map[string]any{
 		"model":      "test",
 		"messages":   []map[string]string{{"role": "user", "content": prompt}},
@@ -1926,20 +3190,20 @@ func (a *App) testChat(port int, prompt string, maxTokens int) (float64, int, er
 	req, err := http.NewRequest(http.MethodPost,
 		fmt.Sprintf("http://127.0.0.1:%d/v1/chat/completions", port), bytes.NewReader(body))
 	if err != nil {
-		return 0, 0, err
+		return chatTiming{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if key := a.effectiveAPIKey(); key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := (&http.Client{Timeout: 90 * time.Second}).Do(req) // 看门狗：单次测量超时防止死锁
 	if err != nil {
-		return 0, 0, fmt.Errorf("请求失败: %v", err)
+		return chatTiming{}, fmt.Errorf("请求失败: %v", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
-		return 0, 0, fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncateStr(string(b), 200))
+		return chatTiming{}, fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncateStr(string(b), 200))
 	}
 	var out struct {
 		Usage struct {
@@ -1947,12 +3211,21 @@ func (a *App) testChat(port int, prompt string, maxTokens int) (float64, int, er
 		} `json:"usage"`
 		Timings struct {
 			PredictedPerSecond float64 `json:"predicted_per_second"`
+			PromptPerSecond    float64 `json:"prompt_per_second"`
+			PromptMS           float64 `json:"prompt_ms"`
+			EvalMS             float64 `json:"predicted_ms"`
 		} `json:"timings"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return 0, 0, err
+		return chatTiming{}, err
 	}
-	return out.Timings.PredictedPerSecond, out.Usage.CompletionTokens, nil
+	return chatTiming{
+		TPS:      out.Timings.PredictedPerSecond,
+		Tokens:   out.Usage.CompletionTokens,
+		PromptPS: out.Timings.PromptPerSecond,
+		PromptMS: out.Timings.PromptMS,
+		EvalMS:   out.Timings.EvalMS,
+	}, nil
 }
 
 // effectiveAPIKey returns the global server API key (decrypted) or "".
@@ -1989,44 +3262,135 @@ func truncateStr(s string, n int) string {
 }
 
 // handlePreview renders the CLI command from parameters (POST /api/preview).
+// When bundle_id is provided the preview mirrors the real launch command,
+// including model-specific defaults (e.g. the auto-attached mmproj vision
+// encoder and --mcp flags) — previously the preview omitted --mmproj, which
+// made it look like multimodal models were launched in text-only mode.
 func (a *App) handlePreview(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Params map[string]any `json:"params"`
+		BundleID string         `json:"bundle_id"`
+		Params   map[string]any `json:"params"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	if req.Params == nil {
+		req.Params = map[string]any{}
+	}
+	// Resolve the launch port from the form if present.
+	port := 8080
+	if p, ok := req.Params["port"]; ok {
+		if n, ok := p.(float64); ok && n > 0 {
+			port = int(n)
+		}
+	}
 	chain := config.NewChain(a.registry)
-	chain.Merge(a.cfg.DefaultParams, nil, req.Params)
-	args := chain.ArgList()
+	var args []string
+	if req.BundleID != "" {
+		if b, ok := a.bundles.Get(req.BundleID); ok {
+			chain.Merge(a.cfg.DefaultParams, a.modelDefaults(b, port), req.Params)
+			args = chain.ArgList()
+			if cfgJSON, err := a.mcpCursorJSON(b); err == nil && cfgJSON != "" {
+				args = append(args, "--mcp-servers-json", cfgJSON)
+			}
+		}
+	}
+	if args == nil {
+		chain.Merge(a.cfg.DefaultParams, nil, req.Params)
+		args = chain.ArgList()
+	}
 	a.writeJSON(w, http.StatusOK, map[string]any{
-		"args":   args,
-		"cli":    "llama-server " + chain.CommandLine(),
-		"count":  len(args),
+		"args":  args,
+		"cli":   "llama-server " + strings.Join(args, " "),
+		"count": len(args),
 	})
+}
+
+// modelDefaults returns the model-specific (Level-2) defaults for a bundle.
+// Besides the standard defaults it auto-attaches the bound vision encoder
+// (mmproj) and, for MTP-head models, auto-enables --spec-type draft-mtp so the
+// MTP tensor is used instead of being ignored as unused. This applies to every
+// launch path (manual start, tests, sweeps) unless the user overrides spec_type.
+func (a *App) modelDefaults(b *bundle.Bundle, port int) map[string]any {
+	m := map[string]any{
+		"model":        b.BaseModel.Path,
+		"n_gpu_layers": b.DefaultParams.NGPULayers,
+		"ctx_size":     b.DefaultParams.CtxSize,
+		"load_mode":    b.DefaultParams.LoadMode,
+		"flash_attn":   b.DefaultParams.FlashAttn,
+		"metrics":      true, // 默认开启 /metrics，供监控面板采集
+		"port":         port,
+	}
+	if b.MMProj.Path != "" {
+		m["mmproj"] = b.MMProj.Path
+	}
+	if bundleIsMTP(b) {
+		m["spec_type"] = "draft-mtp"
+	}
+	return m
+}
+
+// bundleIsMTP reports whether a bundle carries an MTP speculative-decoding
+// head. It checks the persisted tags plus file name/path (nextn is llama.cpp's
+// internal next-token-network tensor prefix), then falls back to probing the
+// GGUF's tensor names — so a model like "Qwen3.8-27B-UD-IQ2_XXS.gguf" that
+// embeds a blk.*.nextn.* MTP head without advertising it is still detected.
+func bundleIsMTP(b *bundle.Bundle) bool {
+	if b == nil {
+		return false
+	}
+	for _, t := range b.Tags {
+		if t == "mtp" {
+			return true
+		}
+	}
+	lower := strings.ToLower(b.Name + " " + b.BaseModel.Path)
+	if strings.Contains(lower, "mtp") || strings.Contains(lower, "nextn") {
+		return true
+	}
+	if b.BaseModel.Exists {
+		return bundle.HasMTPHeadByFile(b.BaseModel.Path)
+	}
+	return false
+}
+
+// annotateMTP appends the "mtp" capability tag to each bundle's response copy
+// when its file embeds an MTP head, so the UI can surface the MTP group even
+// for bundles whose persisted tags predate tensor probing.
+func annotateMTP(list []*bundle.Bundle) []*bundle.Bundle {
+	out := make([]*bundle.Bundle, 0, len(list))
+	for _, b := range list {
+		if !bundleIsMTP(b) {
+			out = append(out, b)
+			continue
+		}
+		cp := *b
+		cp.Tags = append([]string{}, b.Tags...)
+		has := false
+		for _, t := range cp.Tags {
+			if t == "mtp" {
+				has = true
+				break
+			}
+		}
+		if !has {
+			cp.Tags = append(cp.Tags, "mtp")
+		}
+		out = append(out, &cp)
+	}
+	return out
 }
 
 // buildArgs resolves the final CLI arguments for a launch.
 func (a *App) buildArgs(b *bundle.Bundle, params map[string]any, port int) []string {
 	chain := config.NewChain(a.registry)
-	modelDefaults := map[string]any{
-		"model":       b.BaseModel.Path,
-		"n_gpu_layers": b.DefaultParams.NGPULayers,
-		"ctx_size":    b.DefaultParams.CtxSize,
-		"load_mode":   b.DefaultParams.LoadMode,
-		"flash_attn":  b.DefaultParams.FlashAttn,
-		"metrics":     true, // 默认开启 /metrics，供监控面板采集
-		"port":        port,
-	}
-	if b.MMProj.Path != "" {
-		modelDefaults["mmproj"] = b.MMProj.Path
-	}
-	chain.Merge(a.cfg.DefaultParams, modelDefaults, params)
+	chain.Merge(a.cfg.DefaultParams, a.modelDefaults(b, port), params)
 	args := chain.ArgList()
-	// Append MCP server flags bound to this bundle (--mcp <name> ...).
-	for _, name := range b.MCPServers {
-		args = append(args, "--mcp", name)
+	// 把绑定到该 bundle 的 MCP 服务器转换为 Cursor 格式内联注入
+	// （llama.cpp 用 --mcp-servers-json，不是 --mcp）
+	if cfgJSON, err := a.mcpCursorJSON(b); err == nil && cfgJSON != "" {
+		args = append(args, "--mcp-servers-json", cfgJSON)
 	}
 	// Inject the globally-configured (encrypted) server API key when the user
 	// did not supply one explicitly in the form.
@@ -2056,11 +3420,13 @@ func (a *App) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", a.handleHealth)
 	mux.HandleFunc("GET /api/system", a.handleSystem)
+	mux.HandleFunc("GET /api/monitor", a.handleMonitor)
 	mux.HandleFunc("GET /api/params", a.handleParams)
 	mux.HandleFunc("/api/bundles", a.handleBundles)
 	mux.HandleFunc("/api/bundles/{id}", a.handleBundleItem)
 	mux.HandleFunc("POST /api/bundles/{id}/configs", a.handleBundleConfigs)
 	mux.HandleFunc("DELETE /api/bundles/{id}/configs/{cfgId}", a.handleBundleConfigItem)
+	mux.HandleFunc("PUT /api/bundles/{id}/mcpservers", a.handleBundleMCPServers)
 	mux.HandleFunc("POST /api/parse", a.handleParseGGUF)
 	mux.HandleFunc("POST /api/bundles/analyze", a.handleAnalyze)
 	mux.HandleFunc("POST /api/bundles/import", a.handleImport)
@@ -2078,6 +3444,10 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("GET /api/mcp", a.handleMCPList)
 	mux.HandleFunc("POST /api/mcp", a.handleMCPAdd)
 	mux.HandleFunc("DELETE /api/mcp/{id}", a.handleMCPDelete)
+	mux.HandleFunc("GET /api/mcp/status", a.handleMCPStatus)
+	mux.HandleFunc("GET /api/mcp/check-env", a.handleMCPCheckEnv)
+	mux.HandleFunc("POST /api/mcp/test", a.handleMCPTest)
+	mux.HandleFunc("GET /api/mcp/templates", a.handleMCPTemplates)
 	mux.HandleFunc("GET /api/config", a.handleConfigGet)
 	mux.HandleFunc("GET /api/config/key", a.handleConfigKey)
 	mux.HandleFunc("PUT /api/config", a.handleConfigPut)
@@ -2085,6 +3455,9 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("POST /api/sessions/start", a.handleStart)
 	mux.HandleFunc("POST /api/test/batch", a.handleTestBatch)
 	mux.HandleFunc("POST /api/test/sweep", a.handleTestSweep)
+	mux.HandleFunc("POST /api/test/cancel", a.handleTestCancel)
+	mux.HandleFunc("GET /api/test/history", a.handleTestHistory)
+	mux.HandleFunc("DELETE /api/test/history", a.handleTestHistoryClear)
 	mux.HandleFunc("POST /api/sessions/{id}/stop", a.handleStop)
 	mux.HandleFunc("POST /api/sessions/{id}/restart", a.handleRestart)
 	mux.HandleFunc("POST /api/preview", a.handlePreview)

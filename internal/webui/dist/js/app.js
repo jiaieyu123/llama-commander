@@ -22,6 +22,10 @@
     debugProxy: '/api/debug/proxy',
     mcpList: '/api/mcp',
     mcpAdd: '/api/mcp',
+    mcpStatus: '/api/mcp/status',
+    mcpTemplates: '/api/mcp/templates',
+    mcpCheckEnv: '/api/mcp/check-env',
+    mcpTest: '/api/mcp/test',
     configGet: '/api/config',
     configPut: '/api/config',
     configKey: '/api/config/key',
@@ -30,7 +34,9 @@
     preview: '/api/preview',
     params: '/api/params',
     testBatch: '/api/test/batch',
-    testSweep: '/api/test/sweep'
+    testSweep: '/api/test/sweep',
+    testCancel: '/api/test/cancel',
+    testHistory: '/api/test/history'
   };
 
   let bundles = [];
@@ -141,8 +147,25 @@
     $('btn-start').addEventListener('click', onStart);
     $('btn-stop').addEventListener('click', onStop);
     $('btn-restart').addEventListener('click', onRestart);
+    // 打开当前选中模型运行实例的 Web 界面
+    $('btn-open-ui').addEventListener('click', function () {
+      getRunning().then(function (running) {
+        if (!running.length) { flashBtn($('btn-open-ui'), '无运行实例'); return; }
+        const mine = selectedId ? running.filter(s => s.bundle_id === selectedId) : [];
+        const target = mine[0] || running[0];
+        window.open('http://127.0.0.1:' + target.port, '_blank');
+      });
+    });
     $('btn-library').addEventListener('click', openLibrary);
     $('btn-debug').addEventListener('click', openDebugModal);
+    $('btn-monitor').addEventListener('click', function () { Monitor.open(); });
+    $('btn-monitor-refresh').addEventListener('click', function () { Monitor.refresh(); });
+    $('btn-monitor-export').addEventListener('click', function () { Monitor.export(); });
+    // 概览页内嵌监控的刷新/导出按钮（与监控弹窗共用数据）
+    const monR2 = $('btn-monitor-refresh2');
+    if (monR2) monR2.addEventListener('click', function () { Monitor.refresh(); flashBtn(monR2, '已刷新'); });
+    const monE2 = $('btn-monitor-export2');
+    if (monE2) monE2.addEventListener('click', function () { Monitor.export(); });
     $('btn-insights').addEventListener('click', openInsights);
     $('insights-refresh').addEventListener('click', loadInsights);
     $('btn-mcp').addEventListener('click', openMCPModal);
@@ -179,6 +202,15 @@
     $('btn-drawer-close').addEventListener('click', closeLibrary);
     $('btn-scan-dir').addEventListener('click', openScanModal);
     $('btn-test').addEventListener('click', openTestModal);
+    $('btn-test-params').addEventListener('click', function () {
+      const box = $('test-params');
+      box.hidden = !box.hidden;
+      this.textContent = box.hidden ? '⚙️ 测试参数 ▾' : '⚙️ 测试参数 ▴';
+    });
+    $('test-cancel').addEventListener('click', cancelTestRun);
+    $('test-export').addEventListener('click', exportTestReport);
+    $('btn-hist-clear').addEventListener('click', clearTestHistory);
+    $('btn-hist-refresh').addEventListener('click', renderTestHistory);
     $('test-start').addEventListener('click', onTestStart);
     $('test-savecfg').addEventListener('click', saveBestConfig);
     $('savecfg-confirm').addEventListener('click', saveConfigNow);
@@ -207,12 +239,52 @@
       });
     });
     $('btn-sweep-fillall').addEventListener('click', fillAllSweepParams);
+    document.querySelectorAll('.scenario-bar .chip[data-scenario]').forEach(function (c) {
+      c.addEventListener('click', function () { applyScenario(c.dataset.scenario); });
+    });
+    $('btn-sweep-clear').addEventListener('click', clearAllSweepParams);
+    $('sweep-radar-close').addEventListener('click', function () { $('sweep-radar-wrap').hidden = true; });
+    $('btn-sweep-settings').addEventListener('click', function () {
+      const box = $('sweep-settings');
+      box.hidden = !box.hidden;
+      this.textContent = box.hidden ? '⚙️ 扫描设置 ▾' : '⚙️ 扫描设置 ▴';
+    });
+    $('sweep-add-param').addEventListener('change', onAddSweepParam);
+    $('sweep-chart-metric').addEventListener('change', renderSweepChart);
+    // 参数审计展开（sweep 结果行 📋）——事件委托，重渲染后仍有效
+    $('sweep-result').addEventListener('click', function (e) {
+      const btn = e.target.closest('.t-audit');
+      if (!btn) return;
+      const it = sweepItems[parseInt(btn.dataset.audit, 10)];
+      if (!it || !it.audit || !it.audit.length) return;
+      let box = document.getElementById('audit-' + btn.dataset.audit);
+      if (box) { box.remove(); return; }
+      const div = document.createElement('div');
+      div.id = 'audit-' + btn.dataset.audit;
+      div.innerHTML = auditTableHTML(it.audit);
+      btn.closest('.test-row').after(div);
+    });
+    // 参数审计展开（batch 结果行 📋）
+    $('test-result').addEventListener('click', function (e) {
+      const btn = e.target.closest('.t-audit');
+      if (!btn) return;
+      const it = testItems.find(function (x) { return x.bundle_id === btn.dataset.audit; });
+      if (!it || !it.audit || !it.audit.length) return;
+      let box = document.getElementById('audit-' + btn.dataset.audit);
+      if (box) { box.remove(); return; }
+      const div = document.createElement('div');
+      div.id = 'audit-' + btn.dataset.audit;
+      div.innerHTML = auditTableHTML(it.audit);
+      btn.closest('.test-row').after(div);
+    });
+    loadSweepAddParamOptions();
     $('sweep-model').addEventListener('change', function () {
       const selId = this.value;
       const sb = bundles.find(function (x) { return x.id === selId; });
       const mxc = sb ? Number(((sb.base_model || {}).metadata || {}).context_length || 0) : 0;
       const sel = $('sw-ctx_size') ? $('sw-ctx_size').closest('.sweep-row').querySelector('.preset') : null;
       fillCtxPreset(sel, mxc);
+      applySweepGrey();
     });
     $('btn-hf-download').addEventListener('click', openHFModal);
     $('btn-cache').addEventListener('click', openCacheModal);
@@ -242,12 +314,77 @@
     $('fs-select').addEventListener('click', selectFSDir);
     $('fs-path').addEventListener('keydown', function (e) { if (e.key === 'Enter') loadFS($('fs-path').value.trim()); });
 
-    // 弹窗关闭
+    // 弹窗关闭：只通过 ✕ / 关闭按钮关闭。
+    // （不监听遮罩点击——避免用户在弹窗外的区域误点导致弹窗意外关闭。）
     document.querySelectorAll('.modal-overlay').forEach(function (ov) {
       ov.querySelectorAll('[data-close]').forEach(function (btn) {
         btn.addEventListener('click', function () { ov.hidden = true; });
       });
-      ov.addEventListener('click', function (e) { if (e.target === ov) ov.hidden = true; });
+    });
+
+    // 主区域 Tab 切换（🏠概览 / ⚙️模型配置 / 🚀运行实例 / 📋控制台）
+    document.querySelectorAll('#main-tabs .main-tab').forEach(function (b) {
+      b.addEventListener('click', function () { switchMainTab(b.dataset.mtab); });
+    });
+    switchMainTab('setup');
+
+    // ── SaaS 侧边栏交互 ──
+    // 侧边栏折叠 / 汉堡（窄屏离屏抽屉）
+    const sbToggle = $('btn-sidebar-toggle');
+    if (sbToggle) sbToggle.addEventListener('click', function () {
+      if (window.innerWidth <= 900) {
+        document.body.classList.toggle('sidebar-open');
+      } else {
+        document.body.classList.toggle('sidebar-collapsed');
+      }
+    });
+    // 侧边栏全局搜索：实时过滤模型库，Enter 选中并切到配置页
+    const sbSearch = $('sidebar-search');
+    if (sbSearch) sbSearch.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') {
+        const q = this.value.trim().toLowerCase();
+        const hit = bundles.find(function (b) { return b.name.toLowerCase().indexOf(q) >= 0; });
+        if (hit) {
+          $('model-select').value = hit.id;
+          selectedId = hit.id;
+          onModelChange();
+          switchMainTab('setup');
+        }
+      }
+    });
+    // 促销卡「快速启动」→ 切到配置页并触发启动
+    const qs = $('btn-quick-start');
+    if (qs) qs.addEventListener('click', function () {
+      switchMainTab('setup');
+      if (selectedId) onStart(); else flashBtn(qs, '请先选择模型');
+    });
+    // 通知铃铛（简单提示）
+    const nf = $('btn-notify');
+    if (nf) nf.addEventListener('click', function () {
+      flashBtn(nf, '暂无新通知');
+    });
+    // 顶栏刷新按钮
+    const trf = $('btn-top-refresh');
+    if (trf) trf.addEventListener('click', function () {
+      refreshAll();
+      flashBtn(trf, '已刷新');
+    });
+
+    // 界面动态设置：恢复上次偏好 + 绑定主题/布局/紧凑切换
+    applyUISettings(loadUISettings());
+    ['ui-theme', 'ui-layout'].forEach(function (id) {
+      const el = $(id);
+      if (el) el.addEventListener('change', saveUISettings);
+    });
+    const uiCp = $('ui-compact');
+    if (uiCp) uiCp.addEventListener('change', saveUISettings);
+    // 场景预设：一键应用常见使用场景的最佳参数组合
+    $('scenario-preset').addEventListener('change', function () {
+      if (this.value) applyScenarioPreset(this.value);
+    });
+    $('btn-scenario-clear').addEventListener('click', function () {
+      $('scenario-preset').value = '';
+      flashBtn($('btn-scenario-clear'), '已还原');
     });
     $('scan-dir').addEventListener('keydown', function (e) { if (e.key === 'Enter') scanDir(); });
 
@@ -310,6 +447,11 @@
       if (b.draft_model && b.draft_model.enabled) comps.push('⚡ 草稿');
       if (b.lora_list && b.lora_list.length) comps.push('🧩 LoRA×' + b.lora_list.length);
       if (b.shard_info && b.shard_info.is_sharded) comps.push('🧩 分片');
+      const lowName = ((b.name || '') + ' ' + ((b.base_model || {}).path || '')).toLowerCase();
+      const hasMtpName = lowName.includes('mtp') || lowName.includes('nextn');
+      const tb = tagBadges(b.tags || []);
+      const cap = ((hasMtpName && !(b.tags || []).includes('mtp') ? '🧩 MTP ' : '') + tb).trim();
+      if (cap) comps.push(cap);
       div.innerHTML = `
         <div class="name">${esc(b.name)}
           <button class="btn small lib-del" data-id="${esc(b.id)}" title="删除">🗑</button>
@@ -391,25 +533,34 @@
     const b = bundles.find(x => x.id === id);
     const meta = $('bundle-meta');
     if (!b) {
-      meta.textContent = '📷 视觉: — | ⚡ 草稿: 未启用 | 🏷️ 标签: —';
+      meta.textContent = '📷 视觉: — | ⚡ 草稿: 未启用 | 🏷️ 能力: —';
+      window.__isMtp = false;
       $('cfg-row-configs').hidden = true;
       return;
     }
     const vis = (b.mmproj && b.mmproj.path) ? '已绑定' : '未绑定';
     const draft = (b.draft_model && b.draft_model.enabled) ? b.draft_model.spec_type : '未启用';
     const mcp = (b.mcp_servers && b.mcp_servers.length) ? b.mcp_servers.join(', ') : '无';
-    meta.textContent = `📷 视觉: ${vis} | ⚡ 草稿: ${draft} | 🧩 MCP: ${mcp} | 🏷️ 标签: ${(b.tags || []).join(', ') || '—'}`;
+    // MTP 检测：文件名/路径含 mtp|nextn（nextn = llama.cpp 下一 token 网络张量
+    // 前缀，很多带 MTP 头的模型如 Qwen-VL 文件名不含 mtp）或带 mtp 标签。
+    const _n = ((b.name || '') + ' ' + ((b.base_model || {}).path || '')).toLowerCase();
+    const isMtp = _n.includes('mtp') || _n.includes('nextn') || (b.tags || []).includes('mtp');
+    window.__isMtp = isMtp;
+    // 能力徽标：MTP（兼容旧 bundle tags 缺失）+ 其他能力标签
+    const badges = tagBadges(b.tags || []);
+    // 避免 MTP 徽标重复（tags 含 mtp 时 tagBadges 已出，这里仅兜底文件名检测）
+    const capStr = ((isMtp && !(b.tags || []).includes('mtp') ? '🧩 MTP ' : '') + badges).trim();
+    meta.textContent = `📷 视觉: ${vis} | ⚡ 草稿: ${draft} | 🧩 MCP: ${mcp} | 🏷️ 能力: ${capStr || '—'}`;
 
     // mmproj 字段提示自动检测路径（留空=自动）
     const mmEl = $('p-mmproj');
     if (mmEl) mmEl.placeholder = (b.mmproj && b.mmproj.path) ? '自动: ' + b.mmproj.path : '未检测到 mmproj，可手动填写';
 
-    // MTP 投机解码组：仅当模型是 MTP 变体（文件名含 mtp 或带 mtp 标签）时显示
-    const isMtp = (b.name || '').toLowerCase().includes('mtp') ||
-      ((b.base_model || {}).path || '').toLowerCase().includes('mtp') ||
-      (b.tags || []).includes('mtp');
-    const mtpGroup = $('cfg-group-mtp');
-    if (mtpGroup) mtpGroup.hidden = !isMtp;
+    // 🧩 投机解码组始终显示（MTP 模型或外部草稿模型都能用）。
+    // MTP 模型默认勾选启用 draft-mtp（用主模型自带 MTP 头投机），避免 MTP
+    // 张量被当作 unused tensor 忽略；普通模型需填独立草稿模型才会生效。
+    const specEl = $('p-spec_type');
+    if (specEl && isMtp && !specEl.checked) specEl.checked = true;
 
     // 用模型默认参数填充表单
     const dp = b.default_params || {};
@@ -470,11 +621,14 @@
         if (rec.load_mode) $('p-load_mode').value = rec.load_mode;
         if (rec.parallel !== undefined && rec.parallel !== null) $('p-parallel').value = rec.parallel;
         $('p-cpu_moe').checked = !!rec.cpu_moe;
+        // 视觉模型纯文本场景：mmproj 走 CPU 省显存给主模型层
+        if (rec.mmproj_cpu) $('p-no_mmproj_offload').checked = true;
         const notes = (rec.notes || []).join('；');
         alert('✨ 一键优化完成\n\n' +
           'GPU 层数: ' + (rec.n_gpu_layers === -1 ? 'auto（全量卸载）' : rec.n_gpu_layers) +
           '\n上下文: ' + rec.ctx_size +
           '\n估算显存: ' + (rec.estimated_vram_gb || 0).toFixed(1) + ' GB' +
+          (rec.mmproj_cpu ? '\nmmproj: 走 CPU（省显存给主模型）' : '') +
           (notes ? '\n\n💡 ' + notes : ''));
         refreshPreview();
         runAudit();
@@ -572,15 +726,98 @@
     $('params-body').innerHTML = html;
   }
 
+  // 场景预设：对话/代码/长文档/省显存/高速 一键填常用参数组合
+  const SCENARIO_PRESETS = {
+    chat: { ctx_size: 4096, batch_size: 2048, flash_attn: 'on', cache_type_k: 'f16', cache_type_v: 'f16' },
+    code: { ctx_size: 8192, batch_size: 4096, flash_attn: 'on', cache_type_k: 'f16', cache_type_v: 'f16', temperature: 0.2 },
+    doc:  { ctx_size: 32768, batch_size: 1024, flash_attn: 'on', cache_type_k: 'q8_0', cache_type_v: 'q8_0', temperature: 0.1 },
+    vram: { ctx_size: 2048, batch_size: 512, flash_attn: 'on', cache_type_k: 'q8_0', cache_type_v: 'q8_0', kv_unified: true },
+    fast: { ctx_size: 4096, batch_size: 8192, flash_attn: 'on', cache_type_k: 'f16', cache_type_v: 'f16', parallel: 4 }
+  };
+  function applyScenarioPreset(name) {
+    const p = SCENARIO_PRESETS[name];
+    if (!p) return;
+    Object.keys(p).forEach(function (k) {
+      const el = $('p-' + k);
+      if (el && p[k] !== undefined) el.value = p[k];
+    });
+    refreshPreview();
+    if (typeof scheduleAudit === 'function') scheduleAudit();
+    flashBtn($('scenario-preset'), '✓ 已应用');
+  }
+
+  // 主区域 Tab 切换：显示对应 data-mtab 的面板，隐藏其它
+  // （🏠概览 = 性能监控 / ⚙️模型配置 = 参数面板 / 🚀运行实例 = 实例卡片 / 📋控制台 = 日志）
+  function switchMainTab(name) {
+    document.querySelectorAll('#main-tabs .main-tab').forEach(function (b) {
+      b.classList.toggle('active', b.dataset.mtab === name);
+    });
+    document.querySelectorAll('section.panel[data-mtab]').forEach(function (s) {
+      s.classList.toggle('mtab-active', s.dataset.mtab === name);
+    });
+    // 顶部工具栏面包屑同步
+    const crumbMap = { overview: '📊 性能监控', setup: '⚙️ 模型配置', instances: '🚀 运行实例', console: '📋 控制台' };
+    const crumb = $('topbar-crumb');
+    if (crumb && crumbMap[name]) crumb.textContent = crumbMap[name];
+    // 切到概览时重绘图表 + 刷新内嵌实时监控（容器可能刚从隐藏变为可见，需 resize 避免 0 宽）
+    if (name === 'overview') {
+      try { if (PerfChart.resize) PerfChart.resize(); } catch (_) {}
+      try { if (window.Monitor) Monitor.refresh(); } catch (_) {}
+    }
+    if (name === 'instances') refreshStatus();
+    if (name === 'console' && typeof applyLogFilter === 'function') applyLogFilter();
+  }
+
+  // ── 界面动态设置（主题/布局/紧凑，localStorage 持久化）────────
+  const UI_KEY = 'lc-ui-settings';
+  function loadUISettings() {
+    let s = {};
+    try { s = JSON.parse(localStorage.getItem(UI_KEY) || '{}'); } catch (_) {}
+    return s;
+  }
+  function applyUISettings(s) {
+    document.body.dataset.theme = s.theme || 'dark';
+    document.body.dataset.layout = s.layout || 'tabs';
+    document.body.dataset.compact = s.compact ? '1' : '0';
+    const th = $('ui-theme'); if (th) th.value = s.theme || 'dark';
+    const ly = $('ui-layout'); if (ly) ly.value = s.layout || 'tabs';
+    const cp = $('ui-compact'); if (cp) cp.checked = !!s.compact;
+    // Tab 式模式下确保有激活面板
+    if ((s.layout || 'tabs') === 'tabs') {
+      const anyActive = document.querySelector('section.panel[data-mtab].mtab-active');
+      if (!anyActive) switchMainTab('setup');
+    }
+    // 双栏模式：确保图表重绘（容器从隐藏变可见）
+    if (s.layout === 'dash' && window.PerfChart) {
+      try { if (PerfChart.resize) PerfChart.resize(); } catch (_) {}
+    }
+  }
+  function saveUISettings() {
+    const s = {
+      theme: $('ui-theme') ? $('ui-theme').value : 'dark',
+      layout: $('ui-layout') ? $('ui-layout').value : 'tabs',
+      compact: $('ui-compact') ? $('ui-compact').checked : false
+    };
+    localStorage.setItem(UI_KEY, JSON.stringify(s));
+    applyUISettings(s);
+  }
+
+  // ── 模型能力徽标 ──────────────────────
+  function tagBadges(tags) {    const m = { mtp: '🧩 MTP', moe: '🌐 MoE', vision: '📷 视觉', reasoning: '🧠 推理', embedding: '📐 嵌入' };
+    const out = [];
+    (tags || []).forEach(function (t) { if (m[t]) out.push(m[t]); });
+    return out.join(' ');
+  }
+
   // ── 命令预览 ──────────────────────────
   function collectParams() {
     const p = {};
-    ['n_gpu_layers', 'ctx_size', 'threads', 'batch_size', 'flash_attn', 'cache_type_k',
-     'cache_type_v', 'rope_scaling', 'rope_scale', 'mmproj', 'parallel', 'embedding', 'rerank',
+    ['n_gpu_layers', 'ctx_size', 'threads', 'batch_size', 'ubatch_size', 'threads_batch', 'flash_attn', 'cache_type_k',
+     'cache_type_v', 'rope_scaling', 'rope_scale', 'mmproj', 'no_mmproj_offload', 'parallel', 'embedding', 'rerank',
      'cache_ram', 'ctx_checkpoints', 'checkpoint_min_step', 'kv_unified', 'threads_http',
-     'metrics', 'props', 'repeat_penalty', 'presence_penalty', 'frequency_penalty',
-     'temperature', 'top_p', 'top_k', 'min_p', 'samplers', 'seed', 'load_mode', 'numa',
-     'host', 'port', 'api_key'].forEach(function (k) {
+     'metrics', 'props', 'slots', 'repeat_penalty', 'presence_penalty', 'frequency_penalty',
+     'temperature', 'top_p', 'top_k', 'min_p', 'samplers', 'sampler_seq', 'seed', 'ignore_eos', 'load_mode', 'numa',
+     'host', 'port', 'api_key', 'agent'].forEach(function (k) {
       const el = $('p-' + k);
       if (!el) return;
       if (el.type === 'checkbox') { p[k] = el.checked; return; }
@@ -590,10 +827,28 @@
       }
     });
     p.cpu_moe = $('p-cpu_moe').checked;
-    // MTP 投机解码：勾选 = draft-mtp（用主模型自带 MTP 头），仅勾选时收集草稿参数
+    if ($('p-n_cpu_moe')) {
+      const v = $('p-n_cpu_moe').value.trim();
+      if (v !== '') p.n_cpu_moe = parseInt(v, 10);
+    }
+    // 🧩 投机解码（组始终显示）：
+    //   MTP 模型勾选 = draft-mtp（用主模型自带 MTP 头投机）
+    //   普通模型勾选 + 填独立草稿模型 = draft-simple + model_draft（外部草稿投机）
+    //   普通模型勾选但未填草稿模型 = 不发送（无草稿则投机无效）
+    //   MTP 模型取消勾选 = none（显式关闭，覆盖后端 MTP 自动兜底）
     const mtp = $('p-spec_type');
     if (mtp && mtp.checked) {
-      p.spec_type = 'draft-mtp';
+      const isMtpModel = !!window.__isMtp;
+      const mdEl = $('p-model_draft');
+      const draftPath = mdEl ? mdEl.value.trim() : '';
+      if (isMtpModel) {
+        p.spec_type = 'draft-mtp'; // 用主模型自带 MTP 头，无需外部草稿
+      } else if (draftPath) {
+        p.spec_type = 'draft-simple';
+        p.model_draft = draftPath; // 外部草稿模型投机必须带草稿路径
+      } else {
+        return p; // 普通模型未填草稿模型 → 投机无效，不发送
+      }
       ['n_gpu_layers_draft', 'spec_draft_threads', 'spec_draft_n_max', 'spec_draft_n_min',
        'spec_draft_p_split', 'spec_draft_p_min'].forEach(function (k) {
         const el = $('p-' + k);
@@ -601,16 +856,19 @@
         const v = el.value.trim();
         if (v !== '') p[k] = /^-?\d+(\.\d+)?$/.test(v) ? (v.indexOf('.') >= 0 ? parseFloat(v) : parseInt(v, 10)) : v;
       });
+    } else if (mtp && window.__isMtp && !mtp.checked) {
+      p.spec_type = 'none';
     }
     return p;
   }
 
   function refreshPreview() {
     const params = collectParams();
-    // Use the real model file path (not the bundle id) in the preview.
+    // Use the real model file path (not the bundle id) in the preview, and pass
+    // bundle_id so the server also reflects auto-attached mmproj / --mcp flags.
     const b = bundles.find(x => x.id === selectedId);
     params.model = b && b.base_model ? b.base_model.path : '';
-    api(API.preview, { method: 'POST', body: JSON.stringify({ params: params }) })
+    api(API.preview, { method: 'POST', body: JSON.stringify({ bundle_id: selectedId, params: params }) })
       .then(function (r) { $('cmd-preview').textContent = r.cli; })
       .catch(function () { /* 未选模型时静默 */ });
   }
@@ -1056,6 +1314,280 @@
     });
   }
 
+  // ── 📡 实时监控 ──────────────────────
+  // 数据来自每个实例的全局 /metrics（llama-server 统计该实例所有请求，含外部
+  // API Key 调用）。后端每 5s 通过 WS 推送，打开弹窗时先 GET /api/monitor 拿快照。
+  // 每实例卡片附带实时趋势图（ECharts，离线自动降级为纯数字）。
+  const MonChart = {
+    charts: {}, // "sid@container" -> echarts instance（支持弹窗 + 概览内嵌多容器）
+    series: {}, // sid -> { pps:[], rps:[], pred:[] }  历史采样（保留 120 点 ≈ 10 分钟）
+    option: function () {
+      return {
+        backgroundColor: 'transparent',
+        tooltip: { trigger: 'axis' },
+        legend: { data: ['输出', '输入', '累计输出'], textStyle: { color: '#8b949e' }, top: 0 },
+        grid: { left: 40, right: 52, top: 28, bottom: 22 },
+        xAxis: { type: 'category', data: [], axisLine: { lineStyle: { color: '#2a3242' } } },
+        yAxis: [
+          { type: 'value', name: 'tok/s', splitLine: { lineStyle: { color: '#1c2230' } } },
+          { type: 'value', name: 'tok', splitLine: { show: false }, axisLabel: { color: '#8b949e' } }
+        ],
+        series: [
+          { name: '输出', type: 'line', smooth: true, showSymbol: false, yAxisIndex: 0, lineStyle: { color: '#4f8cff', width: 2 }, areaStyle: { color: 'rgba(79,140,255,.12)' }, data: [] },
+          { name: '输入', type: 'line', smooth: true, showSymbol: false, yAxisIndex: 0, lineStyle: { color: '#3fb950', width: 2 }, data: [] },
+          { name: '累计输出', type: 'line', step: 'end', showSymbol: false, yAxisIndex: 1, lineStyle: { color: '#f0a45e', width: 2 }, data: [] }
+        ]
+      };
+    },
+    ensure: function (sid, container, el) {
+      if (typeof echarts === 'undefined' || !el) return null;
+      const key = sid + '@' + container;
+      if (!this.charts[key]) {
+        this.charts[key] = echarts.init(el, null, { renderer: 'canvas' });
+        this.charts[key].setOption(this.option());
+      }
+      return this.charts[key];
+    },
+    replay: function (sid) {
+      const s = this.series[sid];
+      if (!s) return;
+      // 回放到该 sid 的所有容器图表
+      const prefix = sid + '@';
+      for (const key in this.charts) {
+        if (key.indexOf(prefix) !== 0) continue;
+        const ch = this.charts[key];
+        if (!ch) continue;
+        ch.setOption({
+          xAxis: { data: s.pps.map(function (_, i) { return MonChart.fmt(i, s.pps.length); }) },
+          series: [{ data: s.pps }, { data: s.rps }, { data: s.pred }]
+        });
+      }
+    },
+    push: function (sid, m) {
+      if (!this.series[sid]) this.series[sid] = { pps: [], rps: [], pred: [] };
+      const s = this.series[sid];
+      s.pps.push(isFinite(m.prompt_per_second) ? m.prompt_per_second : 0);
+      s.rps.push(isFinite(m.predicted_per_second) ? m.predicted_per_second : 0);
+      s.pred.push(typeof m.n_predicted_tokens_total === 'number'
+        ? m.n_predicted_tokens_total : (s.pred.length ? s.pred[s.pred.length - 1] : 0));
+      if (s.pps.length > 120) { s.pps.shift(); s.rps.shift(); s.pred.shift(); }
+      this.replay(sid);
+    },
+    fmt: function (idx, len) {
+      const t = new Date(Date.now() - (len - 1 - idx) * 5000);
+      return t.toLocaleTimeString('zh-CN', { hour12: false });
+    },
+    resetCharts: function () {
+      // 弹窗刷新会重建 DOM → 释放旧图表实例，保留历史 series 供回放
+      for (const key in this.charts) { this.charts[key].dispose(); }
+      this.charts = {};
+    }
+  };
+
+  // 监控目标容器：弹窗(#monitor-body) + 概览页(#monitor-inline) 共用一套数据
+  const Monitor = {
+    containers: ['monitor-body', 'monitor-inline'],
+    active: function () { return this.containers.filter(function (c) { return document.getElementById(c); }); },
+    open: function () { $('monitor-modal').hidden = false; this.refresh(); },
+    refresh: function () {
+      const list = this.active();
+      if (!list.length) return;
+      MonChart.resetCharts();
+      api('/api/monitor').then(function (r) {
+        const data = r.instances || [];
+        list.forEach(function (cid) {
+          const body = document.getElementById(cid);
+          if (!body) return;
+          if (!data.length) {
+            body.innerHTML = '<div class="empty-hint">暂无运行实例。启动模型后这里会实时显示输入/输出 token、速率、并发槽位与 KV 占用。</div>';
+            return;
+          }
+          let html = '';
+          data.forEach(function (it) { html += Monitor.card(it); });
+          body.innerHTML = html;
+        });
+        data.forEach(function (it) {
+          // 每个容器独立建图（仅当容器可见，避免 0 宽）
+          list.forEach(function (cid) {
+            const visible = !!document.getElementById(cid).offsetParent;
+            const el = document.querySelector('#' + cid + ' .monitor-card[data-session="' + it.session_id + '"] .monitor-chart');
+            if (el && visible) MonChart.ensure(it.session_id, cid, el);
+          });
+          MonChart.replay(it.session_id);
+          const m = (window.__liveMetrics || {})[it.session_id];
+          if (m) Monitor.update(it.session_id, m);
+          if (it.requests && it.requests.length) Monitor.renderRequests(it.session_id, it.requests);
+        });
+        list.forEach(function (cid) {
+          document.querySelectorAll('#' + cid + ' .mon-big').forEach(function (btn) {
+            btn.addEventListener('click', function () { Monitor.openBig(btn.getAttribute('data-sid')); });
+          });
+        });
+      }).catch(function () {
+        list.forEach(function (cid) {
+          const body = document.getElementById(cid);
+          if (body) body.innerHTML = '<div class="empty-hint">监控接口不可用。</div>';
+        });
+      });
+    },
+    card: function (it) {
+      const m = it.metrics || {};
+      const fmt = function (v) { return typeof v === 'number' ? v.toLocaleString() : '--'; };
+      const rate = function (v) { return (typeof v === 'number' && isFinite(v)) ? v.toFixed(1) : '--'; };
+      const kv = (typeof m.kv_cache_usage_ratio === 'number')
+        ? (m.kv_cache_usage_ratio * 100).toFixed(0) + '%' : '--';
+      return `<div class="monitor-card" data-session="${esc(it.session_id)}">
+        <div class="monitor-head"><b>${esc(it.bundle || ('session ' + it.session_id))}</b>
+          <span class="monitor-tag">:${it.port}</span>
+          <span class="monitor-tag">${it.status === 'running' ? '●' : '◌'} ${it.uptime || '--'}</span>
+          <button class="btn small mon-big" data-sid="${esc(it.session_id)}" title="大图与请求历史">📈</button>
+        </div>
+        <div class="metric-stats">
+          <div class="metric"><span class="m-label">⬇ 输入</span><span class="m-value" data-role="prompt">${fmt(m.n_prompt_tokens_total)}</span><span class="m-unit">tok</span></div>
+          <div class="metric"><span class="m-label">⬆ 输出</span><span class="m-value" data-role="pred">${fmt(m.n_predicted_tokens_total)}</span><span class="m-unit">tok</span></div>
+          <div class="metric"><span class="m-label">⬇ 输入速率</span><span class="m-value" data-role="pps">${rate(m.prompt_per_second)}</span><span class="m-unit">tok/s</span></div>
+          <div class="metric"><span class="m-label">⬆ 输出速率</span><span class="m-value" data-role="rps">${rate(m.predicted_per_second)}</span><span class="m-unit">tok/s</span></div>
+          <div class="metric"><span class="m-label">🧵 并发槽位</span><span class="m-value" data-role="slots">${fmt(m.slots_processing)}</span></div>
+          <div class="metric"><span class="m-label">🧠 KV 占用</span><span class="m-value" data-role="kv">${kv}</span></div>
+        </div>
+        <div class="monitor-chart" style="height:150px;margin-top:8px"></div>
+        <div class="req-history" data-sid="${esc(it.session_id)}"></div>
+      </div>`;
+    },
+    update: function (sid, m) {
+      const cards = this.active().map(function (cid) {
+        return document.querySelector('#' + cid + ' .monitor-card[data-session="' + sid + '"]');
+      }).filter(Boolean);
+      if (!cards.length) { this.refresh(); return; } // 新实例 → 重建卡片
+      cards.forEach(function (card) {
+        const set = function (role, txt) {
+          const e = card.querySelector('[data-role="' + role + '"]');
+          if (e) e.textContent = txt;
+        };
+        if (typeof m.n_prompt_tokens_total === 'number') set('prompt', m.n_prompt_tokens_total.toLocaleString());
+        if (typeof m.n_predicted_tokens_total === 'number') set('pred', m.n_predicted_tokens_total.toLocaleString());
+        if (typeof m.prompt_per_second === 'number' && isFinite(m.prompt_per_second)) set('pps', m.prompt_per_second.toFixed(1));
+        if (typeof m.predicted_per_second === 'number' && isFinite(m.predicted_per_second)) set('rps', m.predicted_per_second.toFixed(1));
+        if (typeof m.slots_processing === 'number') set('slots', m.slots_processing.toLocaleString());
+        if (typeof m.kv_cache_usage_ratio === 'number') set('kv', (m.kv_cache_usage_ratio * 100).toFixed(0) + '%');
+      });
+      MonChart.push(sid, m); // 追加历史采样点并刷新所有容器趋势图
+    },
+    // ── 请求历史 ──────────────────────
+    updateRequests: function (sid, req) {
+      if (!req) return;
+      window.__reqHistory = window.__reqHistory || {};
+      if (!window.__reqHistory[sid]) window.__reqHistory[sid] = [];
+      window.__reqHistory[sid].unshift(req);
+      if (window.__reqHistory[sid].length > 50) window.__reqHistory[sid].pop();
+      this.active().forEach(function (cid) {
+        const box = document.querySelector('#' + cid + ' .req-history[data-sid="' + sid + '"]');
+        if (box) {
+          box.insertAdjacentHTML('afterbegin', reqRow(req));
+          while (box.children.length > 10) box.lastChild.remove();
+        }
+      });
+      if (window.__bigSid === sid) this.appendBigRow(req);
+    },
+    renderRequests: function (sid, list) {
+      window.__reqHistory = window.__reqHistory || {};
+      window.__reqHistory[sid] = list.slice(0, 50);
+      this.active().forEach(function (cid) {
+        const box = document.querySelector('#' + cid + ' .req-history[data-sid="' + sid + '"]');
+        if (box) box.innerHTML = list.slice(0, 10).map(reqRow).join('');
+      });
+    },
+    // ── 大图 / 详情弹窗 ────────────────
+    openBig: function (sid) {
+      const card = document.querySelector('#monitor-body .monitor-card[data-session="' + sid + '"]') ||
+        document.querySelector('#monitor-inline .monitor-card[data-session="' + sid + '"]');
+      const title = card ? ((card.querySelector('.monitor-head b') || {}).textContent) : sid;
+      $('big-title').textContent = '📈 ' + title;
+      $('monitor-big-modal').hidden = false;
+      window.__bigSid = sid;
+      if (typeof echarts !== 'undefined') {
+        const el = $('big-chart');
+        if (window.__bigChart) { window.__bigChart.dispose(); window.__bigChart = null; }
+        window.__bigChart = echarts.init(el, null, { renderer: 'canvas' });
+        window.__bigChart.setOption(MonChart.option());
+        const s = MonChart.series[sid];
+        if (s) window.__bigChart.setOption({
+          xAxis: { data: s.pps.map(function (_, i) { return MonChart.fmt(i, s.pps.length); }) },
+          series: [{ data: s.pps }, { data: s.rps }, { data: s.pred }]
+        });
+        if (!window.__bigResizeBound) {
+          window.addEventListener('resize', function () { if (window.__bigChart) window.__bigChart.resize(); });
+          window.__bigResizeBound = true;
+        }
+      }
+      const hist = (window.__reqHistory || {})[sid] || [];
+      $('big-history').innerHTML = hist.length ? hist.map(reqRow).join('') : '<div class="empty-hint">暂无请求记录。发起一次推理后这里会显示。</div>';
+    },
+    appendBigRow: function (req) {
+      const box = $('big-history');
+      if (!box) return;
+      box.insertAdjacentHTML('afterbegin', reqRow(req));
+      while (box.children.length > 50) box.lastChild.remove();
+    },
+    // ── 导出 CSV ──────────────────────
+    export: function () {
+      const rows = [['实例', '时间', '输入tok', '输出tok', '输入速率', '输出速率', '并发槽位', 'KV%']];
+      const mets = window.__liveMetrics || {};
+      const seen = {};
+      this.active().forEach(function (cid) {
+        document.querySelectorAll('#' + cid + ' .monitor-card').forEach(function (card) {
+          const sid = card.getAttribute('data-session');
+          if (seen[sid]) return;
+          seen[sid] = true;
+          const m = mets[sid] || {};
+          const bundle = ((card.querySelector('.monitor-head b') || {}).textContent) || sid;
+          rows.push([bundle, new Date().toLocaleTimeString('zh-CN', { hour12: false }),
+            m.n_prompt_tokens_total || 0, m.n_predicted_tokens_total || 0,
+            (m.prompt_per_second || 0).toFixed(1), (m.predicted_per_second || 0).toFixed(1),
+            m.slots_processing || 0,
+            m.kv_cache_usage_ratio ? (m.kv_cache_usage_ratio * 100).toFixed(0) + '%' : '0%']);
+        });
+      });
+      rows.push([], ['请求历史', '时间', '输入tok', '输出tok', '输出速率tok/s', '总耗时ms', 'draft']);
+      Object.keys(window.__reqHistory || {}).forEach(function (sid) {
+        (window.__reqHistory[sid] || []).forEach(function (r) {
+          rows.push([sid, r.time, r.prompt_tokens, r.eval_tokens,
+            (r.eval_ps || 0).toFixed(1), r.total_ms || 0,
+            r.draft_total ? (r.draft_accepted + '/' + r.draft_total) : '']);
+        });
+      });
+      const csv = rows.map(function (r) {
+        return r.map(function (c) { return '"' + String(c).replace(/"/g, '""') + '"'; }).join(',');
+      }).join('\n');
+      const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'monitor_' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-') + '.csv';
+      a.click();
+      URL.revokeObjectURL(a.href);
+    }
+  };
+  window.Monitor = Monitor;
+
+  // 全局辅助：打开指定会话的 Web 界面（供日志控制台等调用）
+  window.openInstanceUI = function (sessionId) {
+    getRunning().then(function (running) {
+      if (!running.length) { alert('没有运行中的实例'); return; }
+      const target = sessionId ? running.find(function (s) { return s.id === sessionId; }) : null;
+      const pick = target || running[0];
+      window.open('http://127.0.0.1:' + pick.port, '_blank');
+    });
+  };
+
+  // 请求记录单行渲染
+  function reqRow(req) {
+    const draft = req.draft_total ? ' · 🎯 ' + req.draft_accepted + '/' + req.draft_total : '';
+    return '<div class="req-row"><span class="req-time">' + (req.time || '--') + '</span>' +
+      ' ⬇' + (req.prompt_tokens || 0) + ' ⬆' + (req.eval_tokens || 0) +
+      ' · ' + ((req.eval_ps || 0).toFixed ? (req.eval_ps || 0).toFixed(1) : (req.eval_ps || 0)) + ' tok/s' +
+      ' · ' + Math.round(req.total_ms || 0) + 'ms' + draft + '</div>';
+  }
+
   // ── API 调试面板 ──────────────────────
   let dbgAbort = null;
   let dbgHistory = [];
@@ -1361,44 +1893,118 @@
     return s.length > 16 ? s.slice(0, 15) + '…' : s;
   }
 
-  // ── MCP 服务器管理 ────────────────────
+  // ── MCP 服务器管理（注册 / 模板库 / 环境检测 / 健康状态）────────
   function openMCPModal() {
     $('mcp-modal').hidden = false;
     loadMCP();
+    loadMCPTemplates();
+    checkMCPEnv();
   }
 
   function loadMCP() {
     const box = $('mcp-list');
     box.innerHTML = '<div class="empty-hint">加载中…</div>';
-    api(API.mcpList).then(function (list) {
-      renderMCPList(list);
-    }).catch(function (e) { box.innerHTML = `<div class="audit-item error">🔴 ${esc(e.message)}</div>`; });
+    // 并行拉取服务器列表 + 健康状态（命令是否在 PATH 上）
+    api(API.mcpStatus).catch(function () { return []; }).then(function (statusList) {
+      const byId = {};
+      (statusList || []).forEach(function (st) { byId[st.id] = st; });
+      api(API.mcpList).then(function (list) {
+        renderMCPList(list, byId);
+      }).catch(function (e) { box.innerHTML = '<div class="audit-item error">🔴 ' + esc(e.message) + '</div>'; });
+    });
   }
 
-  function renderMCPList(list) {
+  function renderMCPList(list, byId) {
     const box = $('mcp-list');
     if (!list.length) {
-      box.innerHTML = '<div class="empty-hint">尚未注册任何 MCP 服务器。可注册如 filesystem / memory / fetch 等工具服务器。</div>';
+      box.innerHTML = '<div class="empty-hint">尚未注册任何 MCP 服务器。可从上方模板一键添加，或手动注册。</div>';
       return;
     }
     box.innerHTML = '';
     list.forEach(function (s) {
+      const st = byId[s.id] || {};
+      const dot = s.enabled
+        ? (st.healthy === false ? '<span class="mcp-dot bad" title="命令不在 PATH，可能无法启动"></span>' : '<span class="mcp-dot ok" title="命令可执行"></span>')
+        : '<span class="mcp-dot off" title="已停用"></span>';
       const div = document.createElement('div');
       div.className = 'scan-item';
-      div.innerHTML = `
-        <div>
-          <div class="name">${esc(s.name)} ${s.enabled ? '' : '(停用)'}</div>
-          <div class="meta">命令: ${esc(s.command)} ${esc((s.args || []).join(' '))}</div>
-          <div class="actions" style="margin-top:6px;display:flex;gap:6px">
-            <button class="btn small" data-del="${esc(s.id)}">🗑 删除</button>
-          </div>
-        </div>`;
+      div.innerHTML =
+        '<div>' +
+        '<div class="name">' + dot + ' ' + esc(s.name) + (s.enabled ? '' : ' (停用)') + '</div>' +
+        '<div class="meta">命令: ' + esc(s.command) + ' ' + esc((s.args || []).join(' ')) + '</div>' +
+        '<div class="actions" style="margin-top:6px;display:flex;gap:6px">' +
+        '<button class="btn small" data-test="' + esc(s.id) + '">🧪 测试</button>' +
+        '<button class="btn small" data-bind="' + esc(s.id) + '">🔗 绑定模型</button>' +
+        '<button class="btn small" data-del="' + esc(s.id) + '">🗑 删除</button>' +
+        '<span class="mcp-test-result" data-res="' + esc(s.id) + '"></span>' +
+        '</div></div>';
+      div.querySelector('[data-test]').addEventListener('click', function () {
+        testMCP(s, div.querySelector('[data-res]'));
+      });
+      div.querySelector('[data-bind]').addEventListener('click', function () {
+        bindMCPServer(s, div);
+      });
       div.querySelector('[data-del]').addEventListener('click', function () {
         if (!confirm('删除 MCP 服务器 "' + s.name + '"？')) return;
         api('/api/mcp/' + s.id, { method: 'DELETE' }).then(loadMCP);
       });
       box.appendChild(div);
     });
+  }
+
+  // 🧪 测试 MCP 命令能否启动（启动后立即终止）
+  function testMCP(s, resEl) {
+    if (!resEl) return;
+    resEl.textContent = '⏳ 测试中…';
+    api(API.mcpTest, { method: 'POST', body: JSON.stringify({ command: s.command, args: s.args || [], env: s.env || {} }) })
+      .then(function (r) {
+        resEl.textContent = r.ok ? '✅ 可执行' : '❌ ' + (r.message || '失败');
+        resEl.className = 'mcp-test-result ' + (r.ok ? 'ok' : 'err');
+      })
+      .catch(function (e) { resEl.textContent = '❌ ' + e.message; resEl.className = 'mcp-test-result err'; });
+  }
+
+  // 🔗 把此 MCP 服务器绑定到哪些模型（多选面板，勾选保存）
+  function bindMCPServer(s, row) {
+    let old = row.querySelector('.mcp-bind');
+    if (old) { old.remove(); return; }
+    const panel = document.createElement('div');
+    panel.className = 'mcp-bind';
+    const rows = bundles.map(function (b) {
+      const checked = (b.mcp_servers || []).indexOf(s.name) >= 0 ? 'checked' : '';
+      return '<label class="chk mcp-bind-row"><input type="checkbox" data-bid="' + esc(b.id) + '" ' + checked + '> ' + esc(b.name) + '</label>';
+    }).join('') || '<div class="empty-hint">模型库为空。</div>';
+    panel.innerHTML = '<div class="mcp-bind-title">勾选要使用「' + esc(s.name) + '」的模型：</div>' +
+      '<div class="mcp-bind-list">' + rows + '</div>' +
+      '<div class="actions" style="display:flex;gap:6px;margin-top:6px">' +
+      '<button class="btn primary" data-bind-ok>💾 保存绑定</button>' +
+      '<button class="btn" data-bind-cancel>取消</button></div>';
+    panel.querySelector('[data-bind-cancel]').addEventListener('click', function () { panel.remove(); });
+    panel.querySelector('[data-bind-ok]').addEventListener('click', function () {
+      const checked = {};
+      panel.querySelectorAll('[data-bid]').forEach(function (cb) { checked[cb.dataset.bid] = cb.checked; });
+      const proms = [];
+      let changed = 0;
+      bundles.forEach(function (b) {
+        const cur = (b.mcp_servers || []).slice();
+        const idx = cur.indexOf(s.name);
+        const has = idx >= 0;
+        const want = !!checked[b.id];
+        if (has === want) return;
+        if (want) cur.push(s.name); else cur.splice(idx, 1);
+        proms.push(api('/api/bundles/' + b.id + '/mcpservers', { method: 'PUT', body: JSON.stringify({ servers: cur }) })
+          .then(function () { b.mcp_servers = cur; changed++; }));
+      });
+      Promise.all(proms).then(function () {
+        panel.remove();
+        flashBtn(row.querySelector('[data-bind]'), '✓ 已保存 ' + changed + ' 个');
+        if (changed > 0) {
+          // 刷新模型库/配置面板以更新 🧩 MCP 徽标
+          refreshBundles();
+        }
+      }).catch(function (e) { alert('保存失败: ' + e.message); });
+    });
+    row.appendChild(panel);
   }
 
   function addMCP() {
@@ -1413,6 +2019,113 @@
         loadMCP();
       })
       .catch(function (e) { alert('注册失败: ' + e.message); });
+  }
+
+  // ── 模板库 ─────────────────────────────
+  function loadMCPTemplates() {
+    api(API.mcpTemplates).catch(function () { return []; }).then(function (list) {
+      renderMCPTemplates(list || []);
+    });
+  }
+
+  function renderMCPTemplates(templates) {
+    const container = $('mcp-template-list');
+    if (!container) return;
+    if (!templates.length) { container.innerHTML = '<div class="empty-hint">暂无模板。</div>'; return; }
+    container.innerHTML = '';
+    // 按分类分组展示，推荐排前
+    const groups = {};
+    templates.forEach(function (t) {
+      (groups[t.category || '其他'] = groups[t.category || '其他'] || []).push(t);
+    });
+    Object.keys(groups).forEach(function (cat) {
+      const catEl = document.createElement('div');
+      catEl.className = 'mcp-tpl-cat';
+      catEl.innerHTML = '<div class="mcp-tpl-cat-name">' + esc(cat) + '</div><div class="mcp-tpl-grid"></div>';
+      const grid = catEl.querySelector('.mcp-tpl-grid');
+      groups[cat].sort(function (a, b) { return (b.recommended ? 1 : 0) - (a.recommended ? 1 : 0); })
+        .forEach(function (tpl) {
+          const card = document.createElement('div');
+          card.className = 'mcp-template-card' + (tpl.recommended ? ' recommended' : '');
+          card.innerHTML =
+            '<div class="mcp-template-head"><span class="mcp-template-name">' + esc(tpl.name) + '</span>' +
+            (tpl.recommended ? '<span class="badge">推荐</span>' : '') + '</div>' +
+            '<p class="mcp-template-desc">' + esc(tpl.description) + '</p>' +
+            (tpl.hint ? '<p class="mcp-template-hint">💡 ' + esc(tpl.hint) + '</p>' : '') +
+            '<button class="btn small" data-tpl="' + esc(tpl.id) + '">＋ 使用此工具</button>';
+          card.querySelector('[data-tpl]').addEventListener('click', function () { onAddTemplate(tpl, card); });
+          grid.appendChild(card);
+        });
+      container.appendChild(catEl);
+    });
+  }
+
+  // 从模板添加：内联配置表单（VS Code 内嵌浏览器不支持 window.prompt，用页面内控件）
+  function onAddTemplate(tpl, card) {
+    let old = card.querySelector('.tpl-config');
+    if (old) { old.remove(); return; }
+    const cfg = document.createElement('div');
+    cfg.className = 'tpl-config';
+    let html = '';
+    if (tpl.requires_path) {
+      html += '<div class="field"><label>文件夹/文件路径</label><input type="text" class="tpl-path" placeholder="C:/Users/..."></div>';
+    }
+    if (tpl.requires_text) {
+      html += '<div class="field"><label>' + esc(tpl.requires_text.label || '配置') + '</label><input type="text" class="tpl-text" placeholder="' + esc(tpl.requires_text.placeholder || '') + '"></div>';
+    }
+    (tpl.requires_env || []).forEach(function (envName) {
+      html += '<div class="field"><label>环境变量 ' + esc(envName) + '</label><input type="password" class="tpl-env" data-env="' + esc(envName) + '" placeholder="' + esc(envName) + '"></div>';
+    });
+    html += '<div class="actions" style="display:flex;gap:6px;margin-top:4px">' +
+      '<button class="btn primary" data-tpl-ok>✅ 确认添加</button>' +
+      '<button class="btn" data-tpl-cancel>取消</button></div>';
+    cfg.innerHTML = html;
+    cfg.querySelector('[data-tpl-cancel]').addEventListener('click', function () { cfg.remove(); });
+    cfg.querySelector('[data-tpl-ok]').addEventListener('click', function () {
+      let args = (tpl.args || []).slice();
+      const env = {};
+      const path = cfg.querySelector('.tpl-path');
+      if (path && !path.value.trim()) { alert('请填写路径'); return; }
+      if (path) args = args.map(function (a) { return a.replace(/{path}/g, path.value.trim()); });
+      const txt = cfg.querySelector('.tpl-text');
+      if (txt) {
+        if (!txt.value.trim()) { alert('请填写' + (tpl.requires_text ? tpl.requires_text.label : '配置')); return; }
+        args = args.map(function (a) { return a.replace(/{[^}]+}/g, txt.value.trim()); });
+      }
+      cfg.querySelectorAll('.tpl-env').forEach(function (inp) {
+        env[inp.dataset.env] = inp.value.trim();
+      });
+      const server = {
+        name: tpl.id + '-' + Date.now().toString(36).slice(-4),
+        command: tpl.command,
+        args: args,
+        env: env,
+        enabled: true
+      };
+      api(API.mcpAdd, { method: 'POST', body: JSON.stringify(server) })
+        .then(function () { cfg.remove(); loadMCP(); flashBtn(card.querySelector('[data-tpl]'), '✓ 已添加'); })
+        .catch(function (e) { alert('添加失败: ' + e.message); });
+    });
+    card.appendChild(cfg);
+  }
+
+  // 环境检测提示
+  function checkMCPEnv() {
+    api(API.mcpCheckEnv).catch(function () { return {}; }).then(function (env) {
+      const hint = $('mcp-env-hint');
+      if (!hint) return;
+      const warnings = [];
+      if (!env.npx) warnings.push('未安装 Node.js/npx（大多数模板无法使用）');
+      if (!env.python && !env.uvx) warnings.push('未检测到 Python（部分模板需要）');
+      if (!env.docker) warnings.push('未检测到 Docker（容器模板不可用）');
+      if (warnings.length === 0) {
+        hint.innerHTML = '✅ 环境检测通过！Node.js/Python/Docker 基础依赖已就绪。';
+        hint.className = 'mcp-env-hint ok';
+      } else {
+        hint.innerHTML = '⚠️ ' + warnings.join('；') + '。';
+        hint.className = 'mcp-env-hint warn';
+      }
+    });
   }
 
   // ── 全局设置面板 ──────────────────────
@@ -1551,6 +2264,7 @@
   // ── 批量测试 ───────────────────────────
   let testItems = [];
   let testRunning = false;
+  let testJobId = null;
 
   function openTestModal() {
     $('test-modal').hidden = false;
@@ -1567,6 +2281,14 @@
     $('test-result').innerHTML = '';
     $('test-summary').textContent = '';
     $('test-start').disabled = false;
+    $('test-cancel').hidden = true;
+    $('test-export').hidden = true;
+    testJobId = null;
+    sweepJobId = null;
+    if (window.__testChart) { window.__testChart.dispose(); window.__testChart = null; }
+    if (window.__sweepChart) { window.__sweepChart.dispose(); window.__sweepChart = null; }
+    $('test-chart').style.display = 'none';
+    $('sweep-chart').hidden = true;
     switchTestTab('batch');
   }
 
@@ -1587,20 +2309,38 @@
     const ids = [...document.querySelectorAll('#test-models .tm:checked')].map(function (c) { return c.dataset.id; });
     if (!ids.length) { alert('请至少勾选一个模型'); return; }
     testRunning = true;
+    hideStage();
     testItems = ids.map(function (id) { return { bundle_id: id, name: '排队中…', status: 'pending' }; });
     renderTestResult();
     $('test-start').disabled = true;
     $('test-start').textContent = '⏳ 测试中…';
     $('test-summary').textContent = '共 ' + ids.length + ' 个模型，正在逐个测试…';
-    api(API.testBatch, { method: 'POST', body: JSON.stringify({
-      bundle_ids: ids,
-      prompt: $('test-prompt').value.trim(),
-      max_tokens: parseInt($('test-max-tokens').value, 10) || 16
-    }) }).catch(function (e) { alert('测试启动失败: ' + e.message); testRunning = false; });
+    const tp = {};
+    ['ctx_size', 'n_gpu_layers', 'threads', 'batch_size', 'temperature'].forEach(function (k) {
+      const el = $('tp-' + k);
+      if (!el) return;
+      const v = el.value.trim();
+      if (v === '') return;
+      tp[k] = /^-?\d+(\.\d+)?$/.test(v) ? (v.indexOf('.') >= 0 ? parseFloat(v) : parseInt(v, 10)) : v;
+    });
+    api(API.testBatch, {
+      method: 'POST',
+      body: JSON.stringify({
+        bundle_ids: ids,
+        prompt: $('test-prompt').value.trim(),
+        max_tokens: parseInt($('test-max-tokens').value, 10) || 16,
+        params: tp
+      })
+    }).then(function (r) {
+      testJobId = (r && r.job_id) || null;
+      if (testJobId) $('test-cancel').hidden = false;
+    }).catch(function (e) { alert('测试启动失败: ' + e.message); testRunning = false; });
   }
 
   // 由 ws.js 推送 test_progress / test_done 事件驱动
   function updateTestItem(msg) {
+    // 6 阶段状态机事件（无 status 字段 = 纯阶段广播）
+    if (msg.stage && msg.status === undefined) { setStage(msg.stage); return; }
     const it = testItems.find(function (i) { return i.bundle_id === msg.bundle_id; });
     if (it) {
       it.name = msg.name || it.name;
@@ -1609,12 +2349,19 @@
       it.tps = msg.tps;
       it.tokens = msg.tokens;
       it.error = msg.error;
+      it.vram_gb = msg.vram_gb;
+      it.audit = msg.audit;
     }
     renderTestResult();
     if (msg.type === 'test_done') {
       testRunning = false;
+      hideStage();
+      $('test-cancel').hidden = true;
+      $('test-export').hidden = (msg.results || []).length === 0;
       const ok = (msg.results || []).filter(function (r) { return r.status === 'ok'; }).length;
-      $('test-summary').textContent = '🏁 测试完成：✅ 通过 ' + ok + ' / ' + msg.results.length;
+      $('test-summary').textContent = msg.cancelled
+        ? '⏹ 已取消测试（完成 ' + (msg.results || []).length + ' 个模型）'
+        : '🏁 测试完成：✅ 通过 ' + ok + ' / ' + msg.results.length;
       $('test-start').disabled = false;
       $('test-start').textContent = '▶ 再次测试';
     } else {
@@ -1626,7 +2373,15 @@
 
   function renderTestResult() {
     const box = $('test-result');
-    box.innerHTML = testItems.map(function (it) {
+    // 结果自动排序：已通过(ok)按 TPS 降序在前，失败/排队中在后
+    const sorted = testItems.slice().sort(function (a, b) {
+      const ao = a.status === 'ok' ? 1 : 0, bo = b.status === 'ok' ? 1 : 0;
+      if (ao !== bo) return bo - ao;
+      if (ao === 1) return (b.tps || 0) - (a.tps || 0);
+      return 0;
+    });
+    renderTestChart();
+    box.innerHTML = sorted.map(function (it) {
       const icon = it.status === 'ok' ? '✅' : it.status === 'fail' ? '❌' : '⏳';
       const cls = it.status === 'ok' ? 'ok' : it.status === 'fail' ? 'error' : 'info';
       const stats = [];
@@ -1639,7 +2394,7 @@
       } else {
         stats.push('启动中…');
       }
-      return `<div class="test-row ${cls}"><span class="t-icon">${icon}</span><span class="t-name">${esc(it.name)}</span><span class="t-stat">${esc(stats.filter(Boolean).join(' | '))}</span></div>`;
+      return `<div class="test-row ${cls}"><span class="t-icon">${icon}</span><span class="t-name">${esc(it.name)}</span><span class="t-stat">${esc(stats.filter(Boolean).join(' | '))}</span>${it.audit && it.audit.length ? `<span class="t-audit" data-audit="${esc(it.bundle_id)}" title="参数审计：请求 vs 实际生效">📋</span>` : ''}</div>`;
     }).join('') || '<div class="empty-hint">尚未开始测试。</div>';
   }
 
@@ -1678,26 +2433,64 @@
     { key: 'cpu_moe', label: 'MoE 专家驻留 CPU', type: 'bool', hint: 'MoE 专家留在 CPU', def: '', ph: 'on / off',
       presets: [['on,off', '开 vs 关'], ['on', '开启'], ['off', '关闭']] },
     { key: 'parallel', label: '并行槽位', type: 'int', hint: '并发请求槽位数', def: '', ph: '如 1, 4, 8',
-      presets: [['1,4,8', '低/中/高'], ['4,8', '两档'], ['1', '固定单槽'], ['4', '固定4']] }
+      presets: [['1,4,8', '低/中/高'], ['4,8', '两档'], ['1', '固定单槽'], ['4', '固定4']] },
+    { key: 'main_gpu', label: '主 GPU', type: 'int', hint: '主 GPU 编号（多卡）', def: '', ph: '如 0, 1',
+      presets: [['0,1', '两卡对比'], ['0', '固定0'], ['1', '固定1']] },
+    { key: 'split_mode', label: '张量拆分', type: 'enum', hint: '多卡拆分方式', def: '', ph: 'layer / row',
+      presets: [['layer,row', '两种'], ['layer', '按层'], ['row', '按行']] },
+    { key: 'tensor_split', label: '张量分配', type: 'string', hint: '各卡权重比例', def: '', ph: '如 0.5,0.5',
+      presets: [['0.5,0.5', '双卡均分'], ['0.7,0.3', '偏重']] },
+    { key: 'rope_scale', label: 'RoPE 缩放因子', type: 'float', hint: '上下文外推倍数', def: '', ph: '如 2, 4',
+      presets: [['2,4', '两档'], ['2', '2倍'], ['4', '4倍']] },
+    { key: 'kv_offload', label: 'KV 卸载 GPU', type: 'bool', hint: 'KV 缓存放 GPU', def: '', ph: 'on / off',
+      presets: [['on,off', '开 vs 关'], ['on', '开启'], ['off', '关闭']] },
+    { key: 'keep', label: '保留初始 token', type: 'int', hint: '长上下文复用', def: '', ph: '如 0, 48',
+      presets: [['0,48', '两种'], ['0', '不保留'], ['48', '保留48']] },
+    { key: 'cache_reuse', label: 'KV 复用最小块', type: 'int', hint: '块大小', def: '', ph: '如 256, 512',
+      presets: [['256,512', '两档'], ['0', '禁用'], ['512', '512']] },
+    { key: 'cache_idle_slots', label: '缓存空闲槽位', type: 'bool', hint: '空闲槽位复用', def: '', ph: 'on / off',
+      presets: [['on,off', '开 vs 关'], ['on', '开启'], ['off', '关闭']] },
+    { key: 'context_shift', label: '上下文移位', type: 'bool', hint: '长对话移位', def: '', ph: 'on / off',
+      presets: [['on,off', '开 vs 关'], ['on', '开启'], ['off', '关闭']] },
+    { key: 'threads_batch', label: '批处理线程', type: 'int', hint: '预填充线程', def: '', ph: '如 0, 8, 16',
+      presets: [['0,8,16', '三档'], ['0', '跟随'], ['8', '固定8']] },
+    { key: 'n_cpu_moe', label: 'CPU 专家数', type: 'int', hint: 'MoE 留 CPU 层数', def: '', ph: '如 0, 4, 8',
+      presets: [['0,4,8', '三档'], ['0', '不用'], ['8', '固定8']] },
+    { key: 'no_mmproj_offload', label: 'mmproj 走 CPU', type: 'bool', hint: '省显存给主模型', def: '', ph: 'on / off',
+      presets: [['on,off', '开 vs 关'], ['on', '开启'], ['off', '关闭']] },
+    { key: 'reasoning_effort', label: '推理努力', type: 'enum', hint: '推理模型思考强度', def: '', ph: 'low / medium / high',
+      presets: [['low,medium,high', '三档'], ['medium,high', '两档'], ['low', '低'], ['high', '高']] },
+    { key: 'sampler_seq', label: '简化采样序列', type: 'string', hint: '单字符采样链', def: '', ph: '如 edskypmxt',
+      presets: [['edskypmxt', '默认链'], ['ekpmxt', '精简']] },
+    { key: 'ignore_eos', label: '忽略 EOS', type: 'bool', hint: '不因结束符停止', def: '', ph: 'on / off',
+      presets: [['on,off', '开 vs 关'], ['on', '开启'], ['off', '关闭']] }
   ];
   let sweepMode = 'exhaustive'; // exhaustive | greedy
   let sweepItems = [];
   let sweepRunning = false;
   let sweepBest = -1;
+  let sweepJobId = null;
   let lastBest = null; // {modelId, params, meta} 最近一次测试的最优配置
 
   function switchTestTab(name) {
     document.querySelectorAll('#test-tabs .tab').forEach(function (t) {
       t.classList.toggle('active', t.dataset.tab === name);
     });
+    hideStage();
     $('tab-batch').hidden = name !== 'batch';
     $('tab-sweep').hidden = name !== 'sweep';
+    $('tab-history').hidden = name !== 'history';
     const isSweep = name === 'sweep';
     $('test-summary').textContent = '';
     $('savecfg-row').hidden = true;
     $('test-savecfg').hidden = !lastBest;
     $('test-start').disabled = false;
     $('test-start').textContent = isSweep ? '▶ 开始扫描' : '▶ 开始测试';
+    $('test-cancel').hidden = !(testRunning || sweepRunning);
+    if (name === 'history') {
+      renderTestHistory();
+      return;
+    }
     if (isSweep) {
       renderSweepParams();
       document.querySelectorAll('.sweep-modebar .chip').forEach(function (x) { x.classList.toggle('active', x.dataset.smode === sweepMode); });
@@ -1720,47 +2513,166 @@
     });
   }
 
+  function mxcOfSweepModel() {
+    const sm = $('sweep-model');
+    const sb = bundles.find(function (x) { return x.id === sm.value; });
+    return sb ? Number(((sb.base_model || {}).metadata || {}).context_length || 0) : 0;
+  }
+
+  function sweepRowHTML(p) {
+    const opts = (p.presets || []).map(function (pr) {
+      return '<option value="' + esc(pr[0]) + '">' + esc(pr[1]) + '</option>';
+    }).join('');
+    const numeric = p.type === 'int' || p.type === 'float';
+    const chips = (p.presets || []).map(function (pr) {
+      return '<button class="btn tiny me-chip" data-key="' + p.key + '" data-val="' + esc(pr[0]) + '" title="填入: ' + esc(pr[0]) + '">' + esc(pr[1]) + '</button>';
+    }).join('');
+    return '<span class="sweep-label">' + esc(p.label) + '<i class="sweep-hint">' + esc(p.hint) + '</i></span>' +
+      '<span class="sweep-mode" title=""></span>' +
+      '<span class="sweep-cap" data-cap="' + p.key + '"></span>' +
+      '<input type="text" id="sw-' + p.key + '" data-key="' + p.key + '" value="' + esc(p.def || '') + '" placeholder="' + esc(p.ph || '逗号分隔多个值（多值=扫描，单值=固定）') + '">' +
+      '<button class="btn tiny" data-editor="' + p.key + '" title="多值编辑器：范围生成 / 档位选择">📐</button>' +
+      '<select class="preset" data-target="sw-' + p.key + '" title="一键填入常用值"><option value="">▾ 预设</option>' + opts + '</select>' +
+      '<button class="btn tiny" data-clear="' + p.key + '" title="清空此项">✕</button>' +
+      '<div class="multi-editor" id="me-' + p.key + '" hidden>' +
+      (numeric
+        ? '<div class="me-range"><span>范围</span>' +
+          '<input type="number" class="me-min" data-me="' + p.key + '" placeholder="min" title="最小值">' +
+          '<span>~</span><input type="number" class="me-max" data-me="' + p.key + '" placeholder="max" title="最大值">' +
+          '<span>步长</span><input type="number" class="me-step" data-me="' + p.key + '" placeholder="step" title="步长">' +
+          '<button class="btn tiny" data-gen="' + p.key + '">生成</button></div>'
+        : '') +
+      (chips ? '<div class="me-presets"><span>档位</span>' + chips + '</div>' : '') +
+      '</div>';
+  }
+
+  function bindSweepRow(row) {
+    const inp = row.querySelector('input[data-key]');
+    if (inp) inp.addEventListener('input', updateSweepEstimate);
+    const clearBtn = row.querySelector('[data-clear]');
+    if (clearBtn) clearBtn.addEventListener('click', function () {
+      const t = $('sw-' + clearBtn.dataset.clear);
+      if (t) t.value = '';
+      updateSweepEstimate();
+    });
+    const presetSel = row.querySelector('.preset[data-target]');
+    if (presetSel) presetSel.addEventListener('change', function () {
+      const target = $(presetSel.dataset.target);
+      if (!target || presetSel.value === '') return;
+      target.value = presetSel.value;
+      presetSel.value = '';
+      updateSweepEstimate();
+    });
+    // 多值编辑器：📐 展开/收起
+    const edBtn = row.querySelector('[data-editor]');
+    if (edBtn) edBtn.addEventListener('click', function () {
+      const panel = $('me-' + edBtn.dataset.editor);
+      if (panel) panel.hidden = !panel.hidden;
+    });
+    // 范围生成：min~max:step → 逗号分隔值列表
+    const gen = row.querySelector('[data-gen]');
+    if (gen) gen.addEventListener('click', function () {
+      const key = gen.dataset.gen;
+      const min = parseFloat((row.querySelector('.me-min') || {}).value);
+      const max = parseFloat((row.querySelector('.me-max') || {}).value);
+      const step = parseFloat((row.querySelector('.me-step') || {}).value);
+      if (!isFinite(min) || !isFinite(max) || !isFinite(step) || step <= 0 || max < min) {
+        flashBtn(gen, '请填范围');
+        return;
+      }
+      const vals = [];
+      const isInt = Number.isInteger(min) && Number.isInteger(max) && Number.isInteger(step);
+      const fmt = function (v) { return isInt ? String(Math.round(v)) : String(+v.toFixed(4)); };
+      for (let v = min; v <= max; v += step) vals.push(fmt(v));
+      const target = $('sw-' + key);
+      if (target) {
+        target.value = vals.join(',');
+        updateSweepEstimate();
+        flashBtn(gen, '✓ ' + vals.length + ' 档');
+      }
+    });
+    // 预设 chips：点击填入
+    row.querySelectorAll('.me-chip').forEach(function (chip) {
+      chip.addEventListener('click', function () {
+        const target = $('sw-' + chip.dataset.key);
+        if (target) {
+          target.value = chip.dataset.val;
+          updateSweepEstimate();
+        }
+      });
+    });
+  }
+
+  function addSweepRow(p) {
+    const box = $('sweep-params');
+    const row = document.createElement('div');
+    row.className = 'sweep-row';
+    row.dataset.key = p.key;
+    row.innerHTML = sweepRowHTML(p);
+    bindSweepRow(row);
+    box.appendChild(row);
+    if (p.key === 'ctx_size') fillCtxPreset(row.querySelector('.preset'), mxcOfSweepModel());
+    updateSweepEstimate();
+  }
+
   function renderSweepParams() {
     const box = $('sweep-params');
     box.innerHTML = '';
-    SWEEP_PARAMS.forEach(function (p) {
-      const row = document.createElement('div');
-      row.className = 'sweep-row';
-      const opts = (p.presets || []).map(function (pr) {
-        return '<option value="' + esc(pr[0]) + '">' + esc(pr[1]) + '</option>';
-      }).join('');
-      row.innerHTML =
-        '<span class="sweep-label">' + esc(p.label) + '<i class="sweep-hint">' + esc(p.hint) + '</i></span>' +
-        '<span class="sweep-mode" title=""></span>' +
-        '<input type="text" id="sw-' + p.key + '" data-key="' + p.key + '" value="' + esc(p.def) + '" placeholder="' + esc(p.ph) + '">' +
-        '<select class="preset" data-target="sw-' + p.key + '" title="一键填入常用值"><option value="">▾ 预设</option>' + opts + '</select>' +
-        '<button class="btn tiny" data-clear="' + p.key + '" title="清空此项">✕</button>';
-      box.appendChild(row);
-    });
-    box.querySelectorAll('input[data-key]').forEach(function (inp) {
-      inp.addEventListener('input', updateSweepEstimate);
-    });
-    box.querySelectorAll('[data-clear]').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        $('sw-' + btn.dataset.clear).value = '';
-        updateSweepEstimate();
+    SWEEP_PARAMS.forEach(function (p) { addSweepRow(p); });
+    const ctxRow = box.querySelector('.preset[data-target="sw-ctx_size"]');
+    if (ctxRow) fillCtxPreset(ctxRow, mxcOfSweepModel());
+    applySweepGrey();
+  }
+
+  // ── 动态添加更多可扫参数（从注册表）──────────────
+  function loadSweepAddParamOptions() {
+    api('/api/params').then(function (res) {
+      const list = (res && res.params) || [];
+      window.__sweepParams = list;
+      const used = {};
+      SWEEP_PARAMS.forEach(function (p) { used[p.key] = true; });
+      const sel = $('sweep-add-param');
+      sel.innerHTML = '<option value="">➕ 添加更多参数…</option>';
+      list.forEach(function (pd) {
+        if (used[pd.key] || ['int', 'float', 'enum', 'bool'].indexOf(pd.kind) < 0) return;
+        const o = document.createElement('option');
+        o.value = pd.key;
+        o.textContent = pd.label + '（' + pd.key + '）';
+        sel.appendChild(o);
       });
+    }).catch(function () { /* 忽略加载失败 */ });
+  }
+
+  function sweepKindToType(kind) {
+    if (kind === 'enum') return 'enum';
+    if (kind === 'bool') return 'bool';
+    if (kind === 'float') return 'float';
+    return 'int';
+  }
+
+  function buildPresetsFor(pd, type) {
+    if (type === 'bool') return [['on,off', '开 vs 关'], ['on', '开启'], ['off', '关闭']];
+    if (type === 'enum' && pd.default !== '' && pd.default != null) return [[String(pd.default), '默认值']];
+    return [];
+  }
+
+  function onAddSweepParam() {
+    const sel = $('sweep-add-param');
+    const key = sel.value;
+    if (!key) return;
+    sel.value = '';
+    if (document.getElementById('sw-' + key)) { flashBtn(sel, '已添加'); return; }
+    const pd = (window.__sweepParams || []).find(function (x) { return x.key === key; });
+    if (!pd) return;
+    const type = sweepKindToType(pd.kind);
+    addSweepRow({
+      key: key, label: pd.label || key, type: type,
+      hint: pd.help || '', def: '', ph: '逗号分隔多个值（多值=扫描，单值=固定）',
+      presets: buildPresetsFor(pd, type)
     });
-    // 预设下拉 → 一键填入常用值并刷新组合数
-    box.querySelectorAll('.preset[data-target]').forEach(function (sel) {
-      sel.addEventListener('change', function () {
-        const target = $(sel.dataset.target);
-        if (!target || sel.value === '') return;
-        target.value = sel.value;
-        sel.value = '';
-        updateSweepEstimate();
-      });
-    });
-    // 上下文预设随所选模型的最大上下文动态生成
-    const sm = $('sweep-model');
-    const sb = bundles.find(function (x) { return x.id === sm.value; });
-    const mxc = sb ? Number(((sb.base_model || {}).metadata || {}).context_length || 0) : 0;
-    fillCtxPreset(box.querySelector('.preset[data-target="sw-ctx_size"]'), mxc);
+    const opt = Array.prototype.find.call(sel.options, function (o) { return o.value === key; });
+    if (opt) opt.remove();
+    flashBtn(sel, '✓ 已添加');
   }
 
   function fmtDur(secs) {
@@ -1782,6 +2694,67 @@
     updateSweepEstimate();
   }
 
+  // ── 场景模式：一键按场景点亮常用扫描参数组合 ──────────────
+  const SCENARIOS = {
+    speed: { // 🚀 极速：全量上 GPU、高并发、大 batch
+      n_gpu_layers: '33', ctx_size: '2048,4096,8192', threads: '16,32',
+      batch_size: '1024,2048', flash_attn: 'on', kv_unified: 'on', parallel: '1,4'
+    },
+    vram: { // 💾 省显存：量化 KV、低 ctx、部分卸载
+      n_gpu_layers: '0,16', ctx_size: '1024,2048', cache_type_k: 'q8_0', cache_type_v: 'q8_0',
+      flash_attn: 'on', kv_unified: 'on', threads: '8'
+    },
+    bal: { // ⚖️ 均衡：吞吐与显存兼顾
+      n_gpu_layers: '0,16,33', ctx_size: '2048,4096', threads: '8,16',
+      batch_size: '512,1024,2048', flash_attn: 'on', cache_type_k: 'f16,q8_0', cache_type_v: 'f16,q8_0'
+    }
+  };
+  function clearAllSweepParams() {
+    document.querySelectorAll('#sweep-params input[data-key]').forEach(function (inp) { inp.value = ''; });
+    updateSweepEstimate();
+    flashBtn($('btn-sweep-clear'), '✓ 已清空');
+  }
+  function applyScenario(name) {
+    const sc = SCENARIOS[name];
+    if (!sc) return;
+    document.querySelectorAll('#sweep-params input[data-key]').forEach(function (inp) {
+      inp.value = sc[inp.dataset.key] || '';
+    });
+    updateSweepEstimate();
+    const chip = document.querySelector('.scenario-bar .chip[data-scenario="' + name + '"]');
+    if (chip) flashBtn(chip, '✓ 已应用');
+  }
+
+  // ── 动态灰置：按模型元数据置灰不支持的参数 ──────────────
+  function sweepModelMeta() {
+    const sm = $('sweep-model');
+    const sb = bundles.find(function (x) { return x.id === sm.value; });
+    if (!sb) return { isMoe: false, hasMMProj: false };
+    const m = (sb.base_model && sb.base_model.metadata) || {};
+    const isMoe = !!(m.is_moe || m.expert_count || (sb.base_model && sb.base_model.is_moe));
+    const hasMMProj = !!(sb.mmproj && sb.mmproj.path);
+    return { isMoe: isMoe, hasMMProj: hasMMProj };
+  }
+  function applySweepGrey() {
+    const meta = sweepModelMeta();
+    const rules = {
+      cpu_moe: { ok: meta.isMoe, why: '非 MoE 模型，无需专家驻留 CPU' },
+      n_cpu_moe: { ok: meta.isMoe, why: '非 MoE 模型，无需 CPU 专家数' },
+      no_mmproj_offload: { ok: meta.hasMMProj, why: '该模型无多模态投影（mmproj）' }
+    };
+    document.querySelectorAll('#sweep-params .sweep-row').forEach(function (row) {
+      const key = row.dataset.key;
+      const rule = rules[key];
+      if (!rule) return;
+      const dis = !rule.ok;
+      row.classList.toggle('grey', dis);
+      const inp = row.querySelector('input[data-key]');
+      if (inp) inp.disabled = dis;
+      const lbl = row.querySelector('.sweep-label');
+      if (lbl) lbl.title = dis ? rule.why : '';
+    });
+  }
+
   function updateSweepEstimate() {
     const CAP = 512;
     const PER_COMBO_SEC = 15; // 单个组合平均耗时估算（含启动+推理+停止）
@@ -1793,8 +2766,10 @@
       const p = SWEEP_PARAMS.find(function (x) { return x.key === inp.dataset.key; });
       const lbl = p ? p.label : inp.dataset.key;
       const tag = inp.closest('.sweep-row').querySelector('.sweep-mode');
+      const cap = inp.closest('.sweep-row').querySelector('.sweep-cap');
       if (n === 0) {
         if (tag) { tag.textContent = ''; tag.title = '不参与（用默认值）'; }
+        if (cap) cap.textContent = '';
         untouched.push(lbl);
         return;
       }
@@ -1804,9 +2779,11 @@
         tests += n;
         swept.push(lbl + '(' + vals.join('/') + ')');
         if (tag) { tag.textContent = '🔀'; tag.title = '扫描 ' + n + ' 档'; }
+        if (cap) cap.textContent = '[' + lbl + ': ' + vals[0] + '~' + vals[n - 1] + ' (' + n + ' 档)]';
       } else {
         fixed.push(lbl + '=' + vals[0]);
         if (tag) { tag.textContent = '📌'; tag.title = '固定 ' + vals[0] + '，用于每个组合'; }
+        if (cap) cap.textContent = '[' + lbl + ': 固定 ' + vals[0] + ']';
       }
     });
     const est = $('sweep-estimate');
@@ -1861,19 +2838,27 @@
     });
     if (!params.length) { alert('请至少为一个参数填写多个值'); return; }
     sweepRunning = true;
+    hideStage();
     sweepBest = -1;
     sweepItems = [];
     renderSweepResult();
+    const wrap = $('sweep-radar-wrap');
+    if (wrap) wrap.hidden = true;
     $('test-start').disabled = true;
     $('test-start').textContent = sweepMode === 'greedy' ? '⏳ 寻优中…' : '⏳ 扫描中…';
     $('test-summary').textContent = sweepMode === 'greedy' ? '🔍 正在智能寻优…' : '🔬 正在扫描…';
     api(API.testSweep, { method: 'POST', body: JSON.stringify({
       model_id: modelId,
       prompt: $('sweep-prompt').value.trim(),
-      max_tokens: parseInt($('sweep-max-tokens').value, 10) || 16,
+      max_tokens: parseInt($('sweep-max-tokens').value, 10) || 32,
       mode: sweepMode,
+      repeats: parseInt($('sp-repeats').value, 10) || 1,
+      warmup: $('sp-warmup').checked,
+      ctx: parseInt($('sp-ctx').value, 10) || 0,
       params: params
     }) }).then(function (res) {
+      sweepJobId = (res && res.job_id) || null;
+      if (sweepJobId) $('test-cancel').hidden = false;
       // 用总数预填待测行（仅穷举；智能寻优结果按步骤实时出现）
       if (res && res.total && sweepMode !== 'greedy') {
         const pending = new Array(res.total);
@@ -1894,21 +2879,32 @@
   // 由 ws.js 推送 sweep_progress / sweep_done 事件驱动
   function updateSweepItem(msg) {
     const isGreedy = msg.mode === 'greedy';
+    // 6 阶段状态机事件（无 status 字段 = 纯阶段广播）
+    if (msg.stage && msg.status === undefined) { setStage(msg.stage); return; }
     if (msg.type === 'sweep_progress') {
       sweepItems[msg.combo] = {
         combo: msg.combo, label: msg.label, status: msg.status,
         step: msg.step || '', fixed: msg.fixed || '',
-        load_ms: msg.load_ms, tps: msg.tps, tokens: msg.tokens, error: msg.error
+        load_ms: msg.load_ms, tps: msg.tps, tokens: msg.tokens, error: msg.error,
+        prompt_ps: msg.prompt_ps, prompt_ms: msg.prompt_ms, eval_ms: msg.eval_ms, repeats: msg.repeats,
+        cached: msg.cached, vram_gb: msg.vram_gb, audit: msg.audit
       };
       $('test-summary').textContent = isGreedy
         ? '🔍 寻优中… ' + (msg.step || '') + '（' + (msg.combo + 1) + '/' + msg.total + '）'
         : '🔬 扫描中… 已完成 ' + (msg.combo + 1) + ' / ' + msg.total;
     } else if (msg.type === 'sweep_done') {
       sweepRunning = false;
+      hideStage();
+      $('test-cancel').hidden = true;
+      $('test-export').hidden = (msg.results || []).length === 0;
       const ok = (msg.results || []).filter(function (r) { return r.status === 'ok'; }).length;
       let txt;
-      if (isGreedy) {
-        txt = '🏁 寻优完成：共测 ' + (msg.results || []).length + ' 次，✅ ' + ok + ' 次成功';
+      if (msg.cancelled) {
+        txt = '⏹ 已取消扫描（完成 ' + (msg.results || []).length + ' 次测试）';
+      } else if (isGreedy) {
+        const tested = msg.tested || 0;
+        const reused = (msg.results || []).length - tested;
+        txt = '🏁 寻优完成：共测 ' + tested + ' 个不同组合（复用 ' + reused + ' 次缓存），✅ ' + ok + ' 次成功';
         if (msg.best_label) {
           txt += '　最佳 🏆 ' + msg.best_label + (msg.best_tps ? '（' + msg.best_tps.toFixed(1) + ' tok/s）' : '');
         }
@@ -1930,7 +2926,7 @@
       $('test-summary').textContent = txt;
       $('test-start').disabled = false;
       $('test-start').textContent = isGreedy ? '▶ 再次寻优' : '▶ 再次扫描';
-      if (msg.best_params) {
+      if (msg.best_params && !msg.cancelled) {
         lastBest = { modelId: $('sweep-model').value, params: msg.best_params, meta: msg.best_meta || {}, label: msg.best_label || '' };
         $('test-savecfg').hidden = false;
         $('savecfg-row').hidden = true;
@@ -1938,6 +2934,7 @@
         $('test-savecfg').hidden = true;
         $('savecfg-row').hidden = true;
       }
+      renderSweepRadar();
     }
     renderSweepResult();
   }
@@ -1966,14 +2963,20 @@
           const stats = [];
           if (it.status === 'ok') {
             stats.push('加载 ' + ((it.load_ms / 1000).toFixed(1)) + 's');
+            if (it.prompt_ms) stats.push('首token ' + Math.round(it.prompt_ms) + 'ms');
             if (it.tps) stats.push(it.tps.toFixed(1) + ' tok/s');
             stats.push(it.tokens + ' tok');
+            if (it.vram_gb) stats.push('显存 ' + it.vram_gb.toFixed(1) + 'GB');
+            if (it.repeats > 1) stats.push('×' + it.repeats + '次');
+            if (it.cached) stats.push('⚡复用');
           } else if (it.status === 'fail') stats.push(it.error || '失败');
           else stats.push('启动中…');
-          return '<div class="test-row ' + cls + '"><span class="t-icon">' + icon + '</span><span class="t-name">' + esc(it.label || '') + '</span><span class="t-stat">' + esc(stats.filter(Boolean).join(' | ')) + '</span></div>';
+          const auditBtn = (it.audit && it.audit.length) ? '<span class="t-audit" data-audit="' + it.combo + '" title="参数审计：请求 vs 实际生效">📋</span>' : '';
+          return '<div class="test-row ' + cls + '"><span class="t-icon">' + icon + '</span><span class="t-name">' + esc(it.label || '') + '</span><span class="t-stat">' + esc(stats.filter(Boolean).join(' | ')) + '</span>' + auditBtn + '</div>';
         }).join('');
         return '<div class="sweep-group">' + (g.step ? '<div class="sweep-step">' + esc(g.step) + '</div>' : '') + rows + '</div>';
       }).join('');
+      renderSweepChart();
       return;
     }
     box.innerHTML = sweepItems.map(function (it, i) {
@@ -1983,15 +2986,312 @@
       const stats = [];
       if (it.status === 'ok') {
         stats.push('加载 ' + ((it.load_ms / 1000).toFixed(1)) + 's');
+        if (it.prompt_ms) stats.push('首token ' + Math.round(it.prompt_ms) + 'ms');
         if (it.tps) stats.push(it.tps.toFixed(1) + ' tok/s');
         stats.push(it.tokens + ' tok');
+        if (it.vram_gb) stats.push('显存 ' + it.vram_gb.toFixed(1) + 'GB');
+        if (it.repeats > 1) stats.push('×' + it.repeats + '次');
+        if (it.cached) stats.push('⚡复用');
       } else if (it.status === 'fail') {
         stats.push(it.error || '失败');
       } else {
         stats.push('启动中…');
       }
-      return '<div class="test-row ' + cls + '"><span class="t-icon">' + icon + '</span><span class="t-name">' + esc(it.label || ('组合 ' + i)) + '</span><span class="t-stat">' + esc(stats.filter(Boolean).join(' | ')) + '</span></div>';
+      const auditBtn = (it.audit && it.audit.length) ? '<span class="t-audit" data-audit="' + it.combo + '" title="参数审计：请求 vs 实际生效">📋</span>' : '';
+      return '<div class="test-row ' + cls + '"><span class="t-icon">' + icon + '</span><span class="t-name">' + esc(it.label || ('组合 ' + i)) + '</span><span class="t-stat">' + esc(stats.filter(Boolean).join(' | ')) + '</span>' + auditBtn + '</div>';
     }).join('');
+    renderSweepChart();
+  }
+
+  // ── 测试结果图表 / 取消 / 导出 / 历史 ─────────────────────
+  function truncate(s, n) {
+    s = String(s == null ? '' : s);
+    return s.length > n ? s.slice(0, n - 1) + '…' : s;
+  }
+
+  function renderTestChart() {
+    const el = $('test-chart');
+    if (!el || typeof echarts === 'undefined') return;
+    const ok = testItems.filter(function (i) { return i.status === 'ok' && i.tps; })
+      .sort(function (a, b) { return (b.tps || 0) - (a.tps || 0); });
+    if (!ok.length) { el.style.display = 'none'; return; }
+    el.style.display = '';
+    if (!window.__testChart) window.__testChart = echarts.init(el);
+    const colors = ['#4caf50', '#2196f3', '#ff9800', '#9c27b0', '#00bcd4', '#f44336', '#8bc34a', '#3f51b5'];
+    window.__testChart.setOption({
+      title: { text: '吞吐对比（tok/s，越高越快）', left: 'center', textStyle: { fontSize: 12 } },
+      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+      grid: { left: 50, right: 16, bottom: 28, top: 34 },
+      xAxis: { type: 'category', data: ok.map(function (i) { return truncate(i.name, 16); }), axisLabel: { fontSize: 10, rotate: 20 } },
+      yAxis: { type: 'value', name: 'tok/s', nameTextStyle: { fontSize: 10 } },
+      series: [{
+        type: 'bar', barMaxWidth: 40,
+        data: ok.map(function (i, idx) { return { value: +(i.tps.toFixed(1)), itemStyle: { color: colors[idx % colors.length] } }; }),
+        label: { show: true, position: 'top', fontSize: 10 }
+      }]
+    }, true);
+  }
+
+  function sweepMetric() {
+    const sel = $('sweep-chart-metric');
+    return sel ? sel.value : 'tps';
+  }
+  function renderSweepChart() {
+    const el = $('sweep-chart');
+    if (!el || typeof echarts === 'undefined') return;
+    const metric = sweepMetric();
+    const wrap = el.closest('.test-chart');
+    if (metric === 'pareto') { renderParetoChart(el, wrap); return; }
+    const pick = function (it) {
+      if (metric === 'prompt_ms') return it.prompt_ms || 0;
+      if (metric === 'load_ms') return it.load_ms || 0;
+      return it.tps || 0;
+    };
+    const lower = metric !== 'tps'; // 延迟/加载越低越好
+    const ok = sweepItems.filter(function (i) { return i && i.status === 'ok' && pick(i) > 0; })
+      .sort(function (a, b) { return lower ? (pick(a) - pick(b)) : (pick(b) - pick(a)); });
+    if (!ok.length) { if (wrap) wrap.hidden = true; return; }
+    if (wrap) wrap.hidden = false;
+    if (!window.__sweepChart) window.__sweepChart = echarts.init(el);
+    const names = { tps: '吞吐 tok/s（橙=最高）', prompt_ms: '首 token 延迟 ms（橙=最低）', load_ms: '加载时间 ms（橙=最低）' };
+    const unit = { tps: 'tok/s', prompt_ms: 'ms', load_ms: 'ms' }[metric];
+    window.__sweepChart.setOption({
+      title: { text: '各组合对比 · ' + names[metric], left: 'center', textStyle: { fontSize: 12 } },
+      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+      grid: { left: 50, right: 16, bottom: 44, top: 34 },
+      xAxis: { type: 'category', data: ok.map(function (i) { return truncate(i.label || '', 12); }), axisLabel: { fontSize: 9, rotate: 35 } },
+      yAxis: { type: 'value', name: unit, nameTextStyle: { fontSize: 10 } },
+      series: [{
+        type: 'bar', barMaxWidth: 26,
+        data: ok.map(function (i, idx) { return { value: +(pick(i).toFixed(1)), itemStyle: { color: idx === 0 ? '#ff9800' : '#2196f3' } }; }),
+        label: { show: true, position: 'top', fontSize: 9 }
+      }]
+    }, true);
+  }
+
+  // 🎯 帕累托前沿图（X 显存 GB × Y 速度 tok/s）
+  function renderParetoChart(el, wrap) {
+    const pts = sweepItems.filter(function (i) { return i && i.status === 'ok' && i.tps && i.vram_gb > 0; })
+      .map(function (i) { return { x: i.vram_gb, y: i.tps, label: i.label || '' }; });
+    if (!pts.length) { if (wrap) wrap.hidden = true; return; }
+    if (wrap) wrap.hidden = false;
+    if (!window.__sweepChart) window.__sweepChart = echarts.init(el);
+    // 帕累托前沿：按显存升序，只有比此前所有点都更快（严格更高 TPS）的点才是前沿
+    const sorted = pts.slice().sort(function (a, b) { return a.x - b.x; });
+    const frontier = [];
+    let bestY = -1;
+    sorted.forEach(function (p) {
+      if (p.y > bestY) { bestY = p.y; frontier.push(p); }
+    });
+    window.__sweepChart.setOption({
+      title: { text: '🎯 帕累托前沿（显存 GB × 吞吐）', left: 'center', textStyle: { fontSize: 12 } },
+      tooltip: {
+        trigger: 'item',
+        formatter: function (p) {
+          if (p.seriesIndex === 1) return '前沿 ' + p.data.label + '<br/>显存 ' + p.data.x.toFixed(1) + ' GB · ' + p.data.y.toFixed(1) + ' tok/s';
+          return p.data.label + '<br/>显存 ' + p.data.x.toFixed(1) + ' GB · ' + p.data.y.toFixed(1) + ' tok/s';
+        }
+      },
+      legend: { bottom: 0, data: ['组合', '前沿'] },
+      grid: { left: 55, right: 22, bottom: 40, top: 34 },
+      xAxis: { type: 'value', name: '显存 GB', nameTextStyle: { fontSize: 10 } },
+      yAxis: { type: 'value', name: 'tok/s', nameTextStyle: { fontSize: 10 } },
+      series: [
+        {
+          name: '组合', type: 'scatter', symbolSize: 11,
+          data: pts.map(function (p) { return { value: [p.x, p.y], label: p.label }; }),
+          itemStyle: { color: '#2196f3', opacity: 0.75 }
+        },
+        {
+          name: '前沿', type: 'line', smooth: true, symbolSize: 9,
+          data: frontier.map(function (p) { return { value: [p.x, p.y], label: p.label }; }),
+          lineStyle: { color: '#ff9800', width: 2 },
+          itemStyle: { color: '#ff9800' }
+        }
+      ]
+    }, true);
+  }
+
+  // 🕸 性能雷达图（最优 vs 平均，TPS/首token延迟/加载/显存 4 维归一化越高越好）
+  function renderSweepRadar() {
+    const wrap = $('sweep-radar-wrap');
+    const el = $('sweep-radar');
+    if (!wrap || !el || typeof echarts === 'undefined') return;
+    const ok = sweepItems.filter(function (i) { return i && i.status === 'ok' && i.tps; });
+    if (!ok.length) { wrap.hidden = true; return; }
+    let best = ok[0];
+    ok.forEach(function (i) { if (i.tps > best.tps) best = i; });
+    const dims = [
+      { key: 'tps', name: '吞吐', higher: true },
+      { key: 'prompt_ms', name: '首token延迟', higher: false },
+      { key: 'load_ms', name: '加载', higher: false },
+      { key: 'vram_gb', name: '显存', higher: false }
+    ];
+    const val = function (it, key) {
+      if (key === 'tps') return it.tps || 0;
+      if (key === 'prompt_ms') return it.prompt_ms || 0;
+      if (key === 'load_ms') return it.load_ms || 0;
+      return it.vram_gb || 0;
+    };
+    const mm = {};
+    dims.forEach(function (d) {
+      let mn = Infinity, mx = -Infinity;
+      ok.forEach(function (it) { const v = val(it, d.key); if (v < mn) mn = v; if (v > mx) mx = v; });
+      mm[d.key] = { mn: mn, mx: mx };
+    });
+    const norm = function (it, d) {
+      const m = mm[d.key];
+      if (m.mx === m.mn) return 1;
+      const r = (val(it, d.key) - m.mn) / (m.mx - m.mn);
+      return d.higher ? r : 1 - r;
+    };
+    const avg = {};
+    dims.forEach(function (d) { avg[d.key] = 0; });
+    ok.forEach(function (it) { dims.forEach(function (d) { avg[d.key] += val(it, d.key); }); });
+    dims.forEach(function (d) { avg[d.key] /= ok.length; });
+    const avgVals = dims.map(function (d) {
+      const m = mm[d.key];
+      if (m.mx === m.mn) return 1;
+      const r = (avg[d.key] - m.mn) / (m.mx - m.mn);
+      return d.higher ? r : 1 - r;
+    });
+    if (!window.__sweepRadar) window.__sweepRadar = echarts.init(el);
+    const bestName = '最优 ' + (best.tps ? best.tps.toFixed(1) + ' tok/s' : '');
+    window.__sweepRadar.setOption({
+      tooltip: {},
+      legend: { bottom: 0, data: [bestName, '平均'] },
+      radar: { indicator: dims.map(function (d) { return { name: d.name, max: 1 }; }), radius: '60%' },
+      series: [{
+        type: 'radar',
+        data: [
+          { name: bestName, value: dims.map(function (d) { return +norm(best, d).toFixed(2); }), areaStyle: { color: 'rgba(76,175,80,0.30)' }, lineStyle: { color: '#4caf50' }, itemStyle: { color: '#4caf50' } },
+          { name: '平均', value: avgVals.map(function (v) { return +v.toFixed(2); }), areaStyle: { color: 'rgba(33,150,243,0.18)' }, lineStyle: { color: '#2196f3' }, itemStyle: { color: '#2196f3' } }
+        ]
+      }]
+    }, true);
+    wrap.hidden = false;
+  }
+
+  // ── 6 阶段状态机（validating→auditing→warming_up→benchmarking→cleaning）──
+  const STAGES = ['queued', 'validating', 'auditing', 'warming_up', 'benchmarking', 'cleaning'];
+  function setStage(stage) {
+    const bar = $('stage-bar');
+    if (!bar || !stage || STAGES.indexOf(stage) < 0) return;
+    bar.hidden = false;
+    const cur = STAGES.indexOf(stage);
+    bar.querySelectorAll('.stage-chip').forEach(function (chip) {
+      const idx = STAGES.indexOf(chip.dataset.stage);
+      chip.classList.toggle('active', idx === cur);
+      chip.classList.toggle('done', idx < cur);
+    });
+  }
+  function hideStage() {
+    const bar = $('stage-bar');
+    if (bar) bar.hidden = true;
+  }
+
+  // 📋 参数审计表（请求 vs 实际生效）
+  function auditTableHTML(audit) {
+    if (!audit || !audit.length) return '';
+    const rows = audit.map(function (a) {
+      const icon = a.same ? '✅' : '⚠️';
+      return '<tr class="' + (a.same ? 'same' : 'diff') + '"><td>' + esc(a.label || a.key) + '</td><td>' + esc(a.requested || '—') + '</td><td>' + esc(a.effective || '—') + '</td><td>' + icon + ' ' + esc(a.note || '') + '</td></tr>';
+    }).join('');
+    return '<div class="audit-box"><table class="audit-table"><thead><tr><th>参数</th><th>请求</th><th>实际生效</th><th>状态</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+  }
+
+  function cancelTestRun() {
+    const jobId = $('tab-sweep').hidden ? testJobId : sweepJobId;
+    if (!jobId) return;
+    api(API.testCancel, { method: 'POST', body: JSON.stringify({ job_id: jobId }) }).then(function () {
+      flashBtn($('test-cancel'), '已请求取消…');
+      $('test-cancel').disabled = true;
+    });
+  }
+
+  function exportTestReport() {
+    const isSweep = !$('tab-sweep').hidden;
+    const rows = isSweep
+      ? [['组合', '状态', '加载(ms)', '吞吐(tok/s)', '生成(tok)', '错误']]
+      : [['模型', '状态', '加载(ms)', '吞吐(tok/s)', '生成(tok)', '错误']];
+    const items = isSweep ? sweepItems : testItems;
+    items.forEach(function (it) {
+      if (!it) return;
+      rows.push([it.label || it.name || '', it.status, it.load_ms || 0, it.tps ? it.tps.toFixed(2) : '', it.tokens || 0, it.error || '']);
+    });
+    const csv = rows.map(function (r) {
+      return r.map(function (c) { return '"' + String(c == null ? '' : c).replace(/"/g, '""') + '"'; }).join(',');
+    }).join('\n');
+    const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = (isSweep ? 'sweep_' : 'test_') + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-') + '.csv';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  function renderTestHistory() {
+    const box = $('test-history-list');
+    if (!box) return;
+    api(API.testHistory).then(function (res) {
+      const list = (res && res.records) || [];
+      if (!list.length) { box.innerHTML = '<div class="empty-hint">暂无测试历史。完成一次测试/扫描后会记录到这里。</div>'; return; }
+      box.innerHTML = list.map(function (rec) {
+        const icon = rec.type === 'sweep' ? '🔬' : '🖥';
+        const sub = rec.type === 'sweep'
+          ? (rec.mode === 'greedy' ? '🔍 智能寻优' : '🔬 参数扫描') + ' · ' + (rec.model || '')
+          : '';
+        const items = (rec.items || []).slice(0, 15).map(function (it) {
+          const cls = it.status === 'ok' ? 'ok' : 'err';
+          const txt = it.name + (it.status === 'ok'
+            ? ' → ' + (it.tps ? it.tps.toFixed(1) + ' tok/s · ' : '') + Math.round((it.load_ms || 0) / 1000) + 's'
+            : ' → ' + (it.error || it.status));
+          return '<div class="test-hist-item ' + cls + '">' + esc(txt) + '</div>';
+        }).join('');
+        const more = (rec.items || []).length > 15 ? '<div class="test-hist-more">… 共 ' + rec.items.length + ' 项</div>' : '';
+        return '<div class="test-hist-card">' +
+          '<div class="test-hist-head"><span>' + icon + ' <b>' + esc(rec.time) + '</b></span>' +
+          '<span class="test-hist-sub">' + esc(rec.summary || '') + (sub ? '　·　' + esc(sub) : '') + '</span>' +
+          '<button class="btn tiny test-hist-export" data-id="' + esc(rec.id) + '" title="导出该条为 CSV">📥</button></div>' +
+          items + more + '</div>';
+      }).join('');
+      box.querySelectorAll('.test-hist-export').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          const rec = list.find(function (x) { return x.id === btn.dataset.id; });
+          if (rec) exportHistoryRecord(rec);
+        });
+      });
+    }).catch(function () { box.innerHTML = '<div class="empty-hint">加载历史失败。</div>'; });
+  }
+
+  function clearTestHistory() {
+    if (!confirm('确定清空全部测试历史？')) return;
+    api(API.testHistory, { method: 'DELETE' }).then(function () {
+      renderTestHistory();
+      flashBtn($('btn-hist-clear'), '✓ 已清空');
+    });
+  }
+
+  function exportHistoryRecord(rec) {
+    const rows = [
+      ['时间', rec.time],
+      ['类型', rec.type === 'sweep' ? (rec.mode === 'greedy' ? '智能寻优' : '参数扫描') : '批量测试'],
+      ['模型', rec.model || ''], ['提示', rec.prompt || ''], ['最大token', rec.max_tokens || ''],
+      ['摘要', rec.summary || ''], [],
+      ['项', '状态', '加载(ms)', '吞吐(tok/s)', '生成(tok)', '错误']
+    ];
+    (rec.items || []).forEach(function (it) {
+      rows.push([it.name, it.status, it.load_ms || 0, it.tps ? it.tps.toFixed(2) : '', it.tokens || 0, it.error || '']);
+    });
+    const csv = rows.map(function (r) {
+      return r.map(function (c) { return '"' + String(c == null ? '' : c).replace(/"/g, '""') + '"'; }).join(',');
+    }).join('\n');
+    const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'test_history_' + rec.id + '.csv';
+    a.click();
+    URL.revokeObjectURL(a.href);
   }
 
   // 点击 💾 → 显示命名行（内嵌浏览器不支持 prompt，改用弹窗内输入框）

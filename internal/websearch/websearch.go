@@ -1,6 +1,12 @@
-// Package websearch provides a built-in, key-free web search MCP server
-// (backed by Bing, which is reachable directly in CN networks). It lets a
-// model call a `web_search` tool without needing Brave/Tavily API keys.
+// Package websearch provides a built-in web search engine for the agent
+// tool. It supports multiple providers:
+//
+//   - Bing HTML scraping (default, key-free, works in CN networks)
+//   - Brave Search API (if BRAVE_API_KEY is set)
+//   - Tavily API (if TAVILY_API_KEY is set)
+//
+// The pipeline is: provider search → low-quality filtering → dedupe →
+// freshness sort → content fetch (readability) → relevance re-rank.
 //
 // Run as a standalone MCP stdio server:
 //
@@ -16,100 +22,77 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
-	"net/url"
 	"os"
-	"regexp"
 	"strings"
 	"time"
 )
 
-// Result is one search hit.
+// Result is one search hit after the full pipeline.
 type Result struct {
-	Title   string `json:"title"`
-	URL     string `json:"url"`
-	Snippet string `json:"snippet"`
+	Title   string  `json:"title"`
+	URL     string  `json:"url"`
+	Snippet string  `json:"snippet"`
+	Content string  `json:"content,omitempty"` // 抓取并抽取的正文章段（可能为空）
+	Date    string  `json:"date,omitempty"`    // 推断的发布日期（YYYY-MM-DD 或空）
+	Score   float64 `json:"-"`                 // 重排分数（内部用）
 }
 
-var (
-	reAlgo  = regexp.MustCompile(`<li class="b_algo"`)
-	reH2    = regexp.MustCompile(`(?s)<h2[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>`)
-	reP     = regexp.MustCompile(`(?s)<p[^>]*>(.*?)</p>`)
-	reTag   = regexp.MustCompile(`<[^>]+>`)
-	reSpace = regexp.MustCompile(`\s+`)
-)
+// Provider is a search backend.
+type Provider interface {
+	Name() string
+	Search(ctx context.Context, query string, count int) ([]Result, error)
+}
 
-const defaultUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-
-// Search performs a Bing web search (no API key required) and returns up to
-// `count` results with title/url/snippet.
+// Search performs a web search through the best available provider and runs
+// the full pipeline (filter → dedupe → freshness → content → rerank).
 func Search(ctx context.Context, query string, count int) ([]Result, error) {
 	if count <= 0 || count > 20 {
 		count = 6
 	}
-	u := "https://www.bing.com/search?q=" + url.QueryEscape(query) + "&count=" + itoa(count)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	p := DefaultProvider()
+	results, err := p.Search(ctx, query, count*2) // 多召回一些供过滤
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", defaultUA)
-	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-	if err != nil {
-		return nil, err
-	}
-	return parseResults(string(body), count), nil
+	results = PostProcess(ctx, results, query, count)
+	return results, nil
 }
 
-func parseResults(html string, count int) []Result {
-	starts := reAlgo.FindAllStringIndex(html, -1)
-	out := make([]Result, 0, len(starts))
-	for i, m := range starts {
-		if len(out) >= count {
-			break
-		}
-		end := len(html)
-		if i+1 < len(starts) {
-			end = starts[i+1][0]
-		} else if idx := strings.Index(html[m[1]:], "</ol>"); idx >= 0 {
-			end = m[1] + idx
-		}
-		block := html[m[1]:end]
-		hm := reH2.FindStringSubmatch(block)
-		if hm == nil {
-			continue
-		}
-		href := hm[1]
-		if !strings.HasPrefix(href, "http") {
-			continue
-		}
-		title := clean(hm[2])
-		if title == "" {
-			continue
-		}
-		snippet := ""
-		if pm := reP.FindStringSubmatch(block); pm != nil {
-			snippet = clean(pm[1])
-		}
-		out = append(out, Result{Title: title, URL: href, Snippet: snippet})
+// package-level API keys (set from the launcher config at startup).
+var (
+	cfgBraveKey  string
+	cfgTavilyKey string
+)
+
+// SetAPIKeys configures API keys programmatically (higher precedence than env).
+func SetAPIKeys(brave, tavily string) {
+	cfgBraveKey = strings.TrimSpace(brave)
+	cfgTavilyKey = strings.TrimSpace(tavily)
+}
+
+// APIKeyConfigured reports whether an API-backed provider is configured.
+func APIKeyConfigured() bool {
+	return cfgTavilyKey != "" || cfgBraveKey != "" ||
+		strings.TrimSpace(os.Getenv("TAVILY_API_KEY")) != "" ||
+		strings.TrimSpace(os.Getenv("BRAVE_API_KEY")) != ""
+}
+
+// DefaultProvider picks the best provider based on available API keys.
+// Precedence: Tavily > Brave > Bing (key-free).
+func DefaultProvider() Provider {
+	if k := cfgTavilyKey; k != "" {
+		return &TavilyProvider{APIKey: k}
 	}
-	return out
-}
-
-func clean(s string) string {
-	s = reTag.ReplaceAllString(s, "")
-	s = reSpace.ReplaceAllString(s, " ")
-	return strings.TrimSpace(s)
-}
-
-func itoa(n int) string {
-	return fmt.Sprintf("%d", n)
+	if v := os.Getenv("TAVILY_API_KEY"); strings.TrimSpace(v) != "" {
+		return &TavilyProvider{APIKey: strings.TrimSpace(v)}
+	}
+	if k := cfgBraveKey; k != "" {
+		return &BraveProvider{APIKey: k}
+	}
+	if v := os.Getenv("BRAVE_API_KEY"); strings.TrimSpace(v) != "" {
+		return &BraveProvider{APIKey: strings.TrimSpace(v)}
+	}
+	return &BingProvider{}
 }
 
 // ---- MCP stdio server (newline-delimited JSON, 2025-06-18 spec) ----
@@ -147,7 +130,7 @@ func handle(msg map[string]any) map[string]any {
 		return map[string]any{"result": map[string]any{
 			"protocolVersion": "2025-06-18",
 			"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
-			"serverInfo":      map[string]any{"name": "llama-launcher-websearch", "version": "1.0.0"},
+			"serverInfo":      map[string]any{"name": "llama-launcher-websearch", "version": "1.1.0"},
 		}}
 	case "ping":
 		return map[string]any{"result": map[string]any{}}
@@ -155,7 +138,7 @@ func handle(msg map[string]any) map[string]any {
 		return map[string]any{"result": map[string]any{"tools": []map[string]any{
 			{
 				"name":        "web_search",
-				"description": "免费的联网搜索（Bing，无需 API Key）。实时返回网页标题、链接和摘要，用于获取最新信息。",
+				"description": "联网搜索（默认 Bing 免 Key；若配置了 BRAVE_API_KEY/TAVILY_API_KEY 则用对应 API）。返回网页标题、链接、摘要与正文片段，并按时效与相关性排序，用于获取最新信息。",
 				"inputSchema": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -185,7 +168,7 @@ func callTool(msg map[string]any) map[string]any {
 	if c, ok := args["count"].(float64); ok && c > 0 {
 		count = int(c)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	results, err := Search(ctx, query, count)
 	if err != nil {
@@ -195,9 +178,20 @@ func callTool(msg map[string]any) map[string]any {
 		return toolError("没有搜到结果，换个关键词试试")
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "「%s」的搜索结果（%d 条）：\n\n", query, len(results))
+	provider := DefaultProvider().Name()
+	fmt.Fprintf(&b, "「%s」的搜索结果（%d 条，来源 %s）：\n\n", query, len(results), provider)
 	for i, r := range results {
-		fmt.Fprintf(&b, "%d. %s\n   %s\n   %s\n\n", i+1, r.Title, r.URL, r.Snippet)
+		fmt.Fprintf(&b, "%d. %s\n   %s\n", i+1, r.Title, r.URL)
+		if r.Date != "" {
+			fmt.Fprintf(&b, "   日期: %s\n", r.Date)
+		}
+		if r.Snippet != "" {
+			fmt.Fprintf(&b, "   摘要: %s\n", r.Snippet)
+		}
+		if r.Content != "" {
+			fmt.Fprintf(&b, "   正文: %s\n", truncate(r.Content, 500))
+		}
+		fmt.Fprintln(&b)
 	}
 	return map[string]any{"result": map[string]any{"content": []map[string]any{
 		{"type": "text", "text": b.String()},
@@ -208,6 +202,14 @@ func toolError(msg string) map[string]any {
 	return map[string]any{"result": map[string]any{"content": []map[string]any{
 		{"type": "text", "text": msg},
 	}, "isError": true}}
+}
+
+func truncate(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }
 
 // readMessage reads one JSON-RPC message, auto-detecting newline-delimited

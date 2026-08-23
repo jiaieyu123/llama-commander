@@ -66,6 +66,8 @@ type GlobalConfig struct {
 	HFEndpoint       string         `json:"hf_endpoint,omitempty"`        // HF 镜像覆盖
 	CacheDir         string         `json:"cache_dir,omitempty"`          // llama.cpp 模型下载缓存目录（空=默认 ~/.cache/llama.cpp）
 	ServerAPIKeyEnc  string         `json:"server_api_key_enc,omitempty"` // AES-256-GCM 加密
+	BraveAPIKeyEnc   string         `json:"brave_api_key_enc,omitempty"`  // Brave Search API key（AES 加密）
+	TavilyAPIKeyEnc  string         `json:"tavily_api_key_enc,omitempty"` // Tavily API key（AES 加密）
 }
 
 // DefaultGlobalConfig returns sensible defaults.
@@ -267,6 +269,7 @@ func NewApp(cfg *GlobalConfig) (*App, error) {
 	a.loadTestHistory()
 	a.loadTestCache()
 	downloader.SetEndpoint(cfg.HFEndpoint)
+	a.applySearchKeys() // 注入已保存的 Brave/Tavily key 到 websearch 包
 	a.startMetricsPoller(context.Background())
 	return a, nil
 }
@@ -1204,7 +1207,16 @@ func (a *App) execAgentTool(ctx context.Context, name, argsJSON string) string {
 		var b strings.Builder
 		fmt.Fprintf(&b, "「%s」的搜索结果（%d 条）：\n", args.Query, len(res))
 		for i, r := range res {
-			fmt.Fprintf(&b, "\n%d. %s\n   %s\n   %s\n", i+1, r.Title, r.URL, r.Snippet)
+			fmt.Fprintf(&b, "\n%d. %s\n   %s\n", i+1, r.Title, r.URL)
+			if r.Date != "" {
+				fmt.Fprintf(&b, "   日期: %s\n", r.Date)
+			}
+			if r.Snippet != "" {
+				fmt.Fprintf(&b, "   摘要: %s\n", r.Snippet)
+			}
+			if r.Content != "" {
+				fmt.Fprintf(&b, "   正文: %s\n", truncateRunes(r.Content, 400))
+			}
 		}
 		return b.String()
 	}
@@ -1854,6 +1866,8 @@ func (a *App) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 		"hf_endpoint":        a.cfg.HFEndpoint,
 		"cache_dir":          a.cfg.CacheDir,
 		"has_api_key":        a.cfg.ServerAPIKeyEnc != "",
+		"has_brave_key":      a.cfg.BraveAPIKeyEnc != "",
+		"has_tavily_key":     a.cfg.TavilyAPIKeyEnc != "",
 	})
 }
 
@@ -1864,9 +1878,28 @@ func (a *App) handleConfigKey(w http.ResponseWriter, r *http.Request) {
 	a.writeJSON(w, http.StatusOK, map[string]string{"key": a.effectiveAPIKey()})
 }
 
+// handleConfigSearchKeys returns decrypted search API keys (GET
+// /api/config/search-keys). Like the server key, only surfaced on demand.
+func (a *App) handleConfigSearchKeys(w http.ResponseWriter, r *http.Request) {
+	dec := func(enc string) string {
+		if enc == "" {
+			return ""
+		}
+		plain, err := secure.Decrypt(a.secretKeyPath, enc)
+		if err != nil {
+			return ""
+		}
+		return plain
+	}
+	a.writeJSON(w, http.StatusOK, map[string]string{
+		"brave":  dec(a.cfg.BraveAPIKeyEnc),
+		"tavily": dec(a.cfg.TavilyAPIKeyEnc),
+	})
+}
+
 // handleConfigPut updates the global settings (PUT /api/config).
 // server_api_key semantics: "" → clear, "__KEEP__" → keep existing,
-// any other value → encrypt & store.
+// any other value → encrypt & store. Same for brave_api_key / tavily_api_key.
 func (a *App) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		BinaryPath       string `json:"binary_path"`
@@ -1874,6 +1907,8 @@ func (a *App) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 		HFEndpoint       string `json:"hf_endpoint"`
 		CacheDir         string `json:"cache_dir"`
 		ServerAPIKey     string `json:"server_api_key"`
+		BraveAPIKey      string `json:"brave_api_key"`
+		TavilyAPIKey     string `json:"tavily_api_key"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -1889,24 +1924,65 @@ func (a *App) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 	a.cfg.CacheDir = strings.TrimSpace(req.CacheDir)
 	a.cache = bundle.NewCacheManager(a.cfg.CacheDir)
 
-	switch req.ServerAPIKey {
-	case "__KEEP__":
-		// keep existing encrypted value
-	case "":
-		a.cfg.ServerAPIKeyEnc = ""
-	default:
-		enc, err := secure.Encrypt(a.secretKeyPath, req.ServerAPIKey)
-		if err != nil {
-			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "加密失败: " + err.Error()})
-			return
+	encOrKeep := func(val, oldEnc string) (string, error) {
+		switch val {
+		case "__KEEP__":
+			return oldEnc, nil
+		case "":
+			return "", nil
+		default:
+			return secure.Encrypt(a.secretKeyPath, val)
 		}
+	}
+	if enc, err := encOrKeep(req.ServerAPIKey, a.cfg.ServerAPIKeyEnc); err != nil {
+		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "server key 加密失败: " + err.Error()})
+		return
+	} else {
 		a.cfg.ServerAPIKeyEnc = enc
 	}
+	if enc, err := encOrKeep(req.BraveAPIKey, a.cfg.BraveAPIKeyEnc); err != nil {
+		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Brave key 加密失败: " + err.Error()})
+		return
+	} else {
+		a.cfg.BraveAPIKeyEnc = enc
+	}
+	if enc, err := encOrKeep(req.TavilyAPIKey, a.cfg.TavilyAPIKeyEnc); err != nil {
+		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Tavily key 加密失败: " + err.Error()})
+		return
+	} else {
+		a.cfg.TavilyAPIKeyEnc = enc
+	}
+	a.applySearchKeys()
 	if err := a.saveConfig(); err != nil {
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 	a.writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// applySearchKeys pushes the decrypted search API keys into the websearch
+// package so the agent tool and the MCP server use the API-backed provider.
+func (a *App) applySearchKeys() {
+	dec := func(enc string) string {
+		if enc == "" {
+			return ""
+		}
+		plain, err := secure.Decrypt(a.secretKeyPath, enc)
+		if err != nil {
+			return ""
+		}
+		return plain
+	}
+	brave, tavily := dec(a.cfg.BraveAPIKeyEnc), dec(a.cfg.TavilyAPIKeyEnc)
+	websearch.SetAPIKeys(brave, tavily)
+	// 同步到环境变量：llama-server 由本进程启动会继承 env，
+	// 其启动的 websearch-mcp 子进程同样继承 → 两条路径都用 API 提供者。
+	if brave != "" {
+		os.Setenv("BRAVE_API_KEY", brave)
+	}
+	if tavily != "" {
+		os.Setenv("TAVILY_API_KEY", tavily)
+	}
 }
 
 // startRequest is the body of POST /api/sessions/start.
@@ -3745,6 +3821,15 @@ func truncateStr(s string, n int) string {
 	return s[:n] + "…"
 }
 
+// truncateRunes shortens a string by rune count (safe for CJK text).
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
+}
+
 // handlePreview renders the CLI command from parameters (POST /api/preview).
 // When bundle_id is provided the preview mirrors the real launch command,
 // including model-specific defaults (e.g. the auto-attached mmproj vision
@@ -3967,6 +4052,7 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("GET /api/mcp/templates", a.handleMCPTemplates)
 	mux.HandleFunc("GET /api/config", a.handleConfigGet)
 	mux.HandleFunc("GET /api/config/key", a.handleConfigKey)
+	mux.HandleFunc("GET /api/config/search-keys", a.handleConfigSearchKeys)
 	mux.HandleFunc("PUT /api/config", a.handleConfigPut)
 	mux.HandleFunc("GET /api/fs/list", a.handleFSList)
 	mux.HandleFunc("POST /api/sessions/start", a.handleStart)

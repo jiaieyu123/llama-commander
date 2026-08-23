@@ -29,6 +29,7 @@
     configGet: '/api/config',
     configPut: '/api/config',
     configKey: '/api/config/key',
+    configSearchKeys: '/api/config/search-keys',
     fsList: '/api/fs/list',
     parse: '/api/parse',
     preview: '/api/preview',
@@ -208,6 +209,12 @@
     });
     $('ak-key-save').addEventListener('click', saveAPIKey);
     $('ak-api-key').addEventListener('input', function () { akAPIKeyChanged = true; });
+    // ── 🔎 搜索 API Key（Brave/Tavily）─────────
+    $('ak-brave-toggle').addEventListener('click', akBraveToggleVisibility);
+    $('ak-tavily-toggle').addEventListener('click', akTavilyToggleVisibility);
+    $('ak-search-save').addEventListener('click', saveSearchKeys);
+    $('ak-brave-key').addEventListener('input', function () { akBraveKeyChanged = true; });
+    $('ak-tavily-key').addEventListener('input', function () { akTavilyKeyChanged = true; });
     // 关闭专属板块 → 停止实时刷新定时器
     document.querySelectorAll('#apikey-modal [data-close]').forEach(function (btn) {
       btn.addEventListener('click', closeAPIKeyModal);
@@ -2330,6 +2337,17 @@
       $('ak-key-hint').textContent = cfgHasAPIKey
         ? '🔒 已保存加密 Key · 点 👁 查看明文（不点不会加载明文）'
         : '未配置全局 Key。可手动粘贴，或点 🎲 生成一个 256 位随机 Key 后 💾 保存。';
+      // 搜索 API Key 状态（不加载明文，只显示占位提示）
+      $('ak-brave-key').value = '';
+      $('ak-brave-key').placeholder = c.has_brave_key ? '••••••••（已保存，输入新值可替换）' : '可选，X-Subscription-Token（search.brave.com 免费申请）';
+      $('ak-tavily-key').value = '';
+      $('ak-tavily-key').placeholder = c.has_tavily_key ? '••••••••（已保存，输入新值可替换）' : '可选，tvly-...（tavily.com 免费申请）';
+      const hint = $('ak-search-hint');
+      if (c.has_brave_key || c.has_tavily_key) {
+        hint.textContent = '🟢 已配置搜索 API（' + (c.has_brave_key ? 'Brave' : '') + (c.has_brave_key && c.has_tavily_key ? ' + ' : '') + (c.has_tavily_key ? 'Tavily' : '') + '），联网搜索将用 API 提供商。';
+      } else {
+        hint.textContent = '不配置时用内置 Bing 免费抓取（泛查询效果一般）；配置后自动切换为对应 API，结果更准。二选一即可，Brave 优先免费额度。';
+      }
     }).catch(function () {
       $('ak-key-hint').textContent = '⚠️ 读取配置失败';
     });
@@ -2372,6 +2390,70 @@
       flashBtn($('ak-key-save'), '✓ 已保存');
       loadAPIKeyState();
       autoFillGlobalKey(); // 主面板自动填入新的全局 Key
+    }).catch(function (e) { alert('保存失败: ' + e.message); });
+  }
+
+  // ── 🔎 搜索 API Key（Brave/Tavily）─────────
+  let akBraveKeyChanged = false;
+  let akTavilyKeyChanged = false;
+
+  function akBraveToggleVisibility() {
+    const input = $('ak-brave-key');
+    const btn = $('ak-brave-toggle');
+    if (input.type === 'password' && !input.value) {
+      api(API.configSearchKeys).then(function (r) {
+        input.value = r.brave || '';
+        if (input.value) { input.type = 'text'; btn.textContent = '🙈'; }
+        else flashBtn(btn, '无');
+      }).catch(function () { flashBtn(btn, '✗'); });
+      return;
+    }
+    if (input.type === 'password') { input.type = 'text'; btn.textContent = '🙈'; }
+    else { input.type = 'password'; btn.textContent = '👁'; }
+  }
+
+  function akTavilyToggleVisibility() {
+    const input = $('ak-tavily-key');
+    const btn = $('ak-tavily-toggle');
+    if (input.type === 'password' && !input.value) {
+      api(API.configSearchKeys).then(function (r) {
+        input.value = r.tavily || '';
+        if (input.value) { input.type = 'text'; btn.textContent = '🙈'; }
+        else flashBtn(btn, '无');
+      }).catch(function () { flashBtn(btn, '✗'); });
+      return;
+    }
+    if (input.type === 'password') { input.type = 'text'; btn.textContent = '🙈'; }
+    else { input.type = 'password'; btn.textContent = '👁'; }
+  }
+
+  // 保存搜索 API Key（带上完整现有配置）
+  function saveSearchKeys() {
+    const braveVal = $('ak-brave-key').value;
+    const tavilyVal = $('ak-tavily-key').value;
+    let brave = '__KEEP__', tavily = '__KEEP__';
+    if (akBraveKeyChanged && braveVal === '') brave = '';
+    else if (akBraveKeyChanged && braveVal !== '') brave = braveVal;
+    if (akTavilyKeyChanged && tavilyVal === '') tavily = '';
+    else if (akTavilyKeyChanged && tavilyVal !== '') tavily = tavilyVal;
+    api(API.configGet).then(function (c) {
+      return api(API.configPut, {
+        method: 'PUT',
+        body: JSON.stringify({
+          binary_path: c.binary_path || '',
+          log_retention_days: c.log_retention_days || 30,
+          hf_endpoint: c.hf_endpoint || '',
+          cache_dir: c.cache_dir || '',
+          server_api_key: '__KEEP__',
+          brave_api_key: brave,
+          tavily_api_key: tavily
+        })
+      });
+    }).then(function () {
+      const st = $('ak-search-status');
+      if (st) { st.textContent = '✅ 已保存（重启后对 agent 搜索生效）'; setTimeout(function () { st.textContent = ''; }, 4000); }
+      flashBtn($('ak-search-save'), '✓');
+      loadAPIKeyState();
     }).catch(function (e) { alert('保存失败: ' + e.message); });
   }
 

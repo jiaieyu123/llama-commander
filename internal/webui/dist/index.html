@@ -414,6 +414,27 @@
           <div class="modal-info" id="ak-key-hint"></div>
         </fieldset>
 
+        <!-- 搜索 API Key（联网搜索质量升级） -->
+        <fieldset class="cfg-group" style="margin-top:12px">
+          <legend>🔎 搜索 API Key（可选 · 提升联网搜索质量）</legend>
+          <div class="modal-info" id="ak-search-hint">不配置时用内置 Bing 免费抓取（泛查询效果一般）；配置后自动切换为对应 API，结果更准。二选一即可，Brave 优先免费额度。</div>
+          <div class="field">
+            <label>Brave Key</label>
+            <input type="password" id="ak-brave-key" placeholder="可选，X-Subscription-Token（search.brave.com 免费申请）" autocomplete="new-password">
+            <button class="btn small" id="ak-brave-toggle" title="显示/隐藏（已保存时点击查看明文）">👁</button>
+          </div>
+          <div class="field">
+            <label>Tavily Key</label>
+            <input type="password" id="ak-tavily-key" placeholder="可选，tvly-...（tavily.com 免费申请）" autocomplete="new-password">
+            <button class="btn small" id="ak-tavily-toggle" title="显示/隐藏（已保存时点击查看明文）">👁</button>
+          </div>
+          <div class="field">
+            <label></label>
+            <button class="btn primary small" id="ak-search-save" title="保存搜索 API Key">💾 保存搜索 Key</button>
+            <span id="ak-search-status" style="margin-left:8px"></span>
+          </div>
+        </fieldset>
+
         <!-- 系统资源（实时） -->
         <fieldset class="cfg-group" style="margin-top:12px">
           <legend>🖥 系统资源（实时）</legend>

@@ -132,9 +132,13 @@ func (m *Manager) ToCursorJSON(names []string) (string, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	cfg := cursorConfig{MCPServers: make(map[string]cursorServer)}
-	for _, name := range names {
+	for _, ref := range names {
 		for _, s := range m.servers {
-			if s.Name != name || !s.Enabled {
+			// bundle 里存的是服务器 ID；兼容旧数据存的 Name
+			if s.ID != ref && s.Name != ref {
+				continue
+			}
+			if !s.Enabled {
 				continue
 			}
 			sc := cursorServer{Command: s.Command, Args: append([]string{}, s.Args...)}
@@ -144,7 +148,7 @@ func (m *Manager) ToCursorJSON(names []string) (string, error) {
 					sc.Env[k] = v
 				}
 			}
-			cfg.MCPServers[name] = sc
+			cfg.MCPServers[s.Name] = sc
 			break
 		}
 	}

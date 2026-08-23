@@ -1805,6 +1805,36 @@
     let timing = null;
     dbgAbort = new AbortController();
 
+    // Agent 工具循环：走 launcher 后端 /api/agent/chat，模型可调用 web_search 等
+    // 工具，后端自动执行并回传真实结果，直到模型给出最终文本。
+    if (tpl === 'chat') {
+      fetch('/api/agent/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sid, messages: req.body.messages, max_tokens: req.body.max_tokens || 1024 }),
+        signal: dbgAbort.signal
+      }).then(function (res) {
+        return res.json().then(function (d) { return { ok: res.ok, d: d }; });
+      }).then(function (r) {
+        if (!r.ok) throw new Error(r.d.error || ('agent 失败 ' + r.status));
+        const totalMs = performance.now() - t0;
+        fullText = r.d.content || '';
+        out.textContent = fullText;
+        out.scrollTop = out.scrollHeight;
+        const rounds = r.d.rounds || 1;
+        stats.innerHTML = '✅ 完成 — <b>🕒 ' + totalMs.toFixed(0) + 'ms</b>（Agent 工具循环 ' + rounds + ' 轮）';
+        pushDebugHistory(tpl, req, fullText || '(空响应)', totalMs);
+      }).catch(function (e) {
+        if (e.name === 'AbortError') stats.textContent = '⏹ 已停止';
+        else stats.textContent = '❌ ' + e.message;
+      }).finally(function () {
+        out.classList.remove('streaming');
+        $('dbg-send').disabled = false;
+        $('dbg-stop').disabled = true;
+      });
+      return;
+    }
+
     fetch(API.debugProxy, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

@@ -1160,6 +1160,180 @@ func (a *App) handleDebugProxy(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// agentToolCall is one tool invocation requested by the model.
+type agentToolCall struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
+// agentChatMsg is one OpenAI-style chat message (may carry tool_calls).
+type agentChatMsg struct {
+	Role       string          `json:"role"`
+	Content    string          `json:"content,omitempty"`
+	ToolCallID string          `json:"tool_call_id,omitempty"`
+	Name       string          `json:"name,omitempty"`
+	ToolCalls  []agentToolCall `json:"tool_calls,omitempty"`
+}
+
+// execAgentTool executes a model-requested MCP tool and returns a text result
+// to feed back into the conversation. Tool names are "<server>_<tool>", e.g.
+// websearch-bing_web_search. The built-in websearch-bing is executed in-process;
+// other MCP servers are not auto-executed (the model just gets a hint).
+func (a *App) execAgentTool(ctx context.Context, name, argsJSON string) string {
+	// 内置免 key Bing 搜索：websearch-bing_web_search / web_search
+	if name == "web_search" || strings.HasPrefix(name, "websearch-bing_") {
+		var args struct {
+			Query string `json:"query"`
+			Count int    `json:"count"`
+		}
+		_ = json.Unmarshal([]byte(argsJSON), &args)
+		if args.Query == "" {
+			return "错误：web_search 需要 query 参数"
+		}
+		res, err := websearch.Search(ctx, args.Query, args.Count)
+		if err != nil {
+			return "搜索失败: " + err.Error()
+		}
+		if len(res) == 0 {
+			return "未找到与「" + args.Query + "」相关的结果，请换个关键词。"
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "「%s」的搜索结果（%d 条）：\n", args.Query, len(res))
+		for i, r := range res {
+			fmt.Fprintf(&b, "\n%d. %s\n   %s\n   %s\n", i+1, r.Title, r.URL, r.Snippet)
+		}
+		return b.String()
+	}
+	return fmt.Sprintf("工具 %s 暂不支持自动执行（目前仅内置 websearch-bing 搜索可用）", name)
+}
+
+// handleAgentChat runs a full agent loop against a running llama-server: it
+// forwards the conversation and whenever the model requests tools it executes
+// them (websearch-bing) and feeds real results back, looping until the model
+// produces a final text answer. (POST /api/agent/chat, body {session_id,
+// messages:[{role,content}], max_tokens})
+func (a *App) handleAgentChat(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SessionID string         `json:"session_id"`
+		Messages  []agentChatMsg `json:"messages"`
+		MaxTokens int            `json:"max_tokens"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if req.SessionID == "" || len(req.Messages) == 0 {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "session_id 与 messages 必填"})
+		return
+	}
+	a.mu.Lock()
+	ar, ok := a.runners[req.SessionID]
+	a.mu.Unlock()
+	if !ok {
+		a.writeJSON(w, http.StatusNotFound, map[string]string{"error": "实例未在运行"})
+		return
+	}
+	// 实例 API key（用于访问 llama-server）
+	key := ""
+	if v, ok := ar.session.Params["api_key"].(string); ok && v != "" {
+		key = v
+	} else if a.cfg.ServerAPIKeyEnc != "" {
+		if plain, err := secure.Decrypt(a.secretKeyPath, a.cfg.ServerAPIKeyEnc); err == nil && plain != "" {
+			key = plain
+		}
+	}
+	base := fmt.Sprintf("http://127.0.0.1:%d", ar.session.Port)
+	maxTokens := req.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = 1024
+	}
+	history := append([]agentChatMsg{}, req.Messages...)
+
+	// 告知 llama-server 可用的 web_search 工具（MCP 工具名带 server 前缀），
+	// 否则模型不会发起工具调用。
+	webSearchTool := map[string]any{
+		"type": "function",
+		"function": map[string]any{
+			"name":        "websearch-bing_web_search",
+			"description": "免费的联网搜索（Bing，无需 API Key）。实时返回网页标题、链接和摘要，用于获取最新信息。",
+			"parameters": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"query": map[string]any{"type": "string", "description": "搜索关键词"},
+					"count": map[string]any{"type": "number", "description": "返回结果数（默认 6，最多 20）"},
+				},
+				"required": []string{"query"},
+			},
+		},
+	}
+
+	rounds := 0
+	for rounds < 8 {
+		rounds++
+		body, _ := json.Marshal(map[string]any{
+			"model": "local", "messages": history, "max_tokens": maxTokens,
+			"tools": []any{webSearchTool},
+		})
+		upReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
+			base+"/v1/chat/completions", bytes.NewReader(body))
+		if err != nil {
+			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		upReq.Header.Set("Content-Type", "application/json")
+		if key != "" {
+			upReq.Header.Set("Authorization", "Bearer "+key)
+		}
+		resp, err := http.DefaultClient.Do(upReq)
+		if err != nil {
+			a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": "无法连接实例: " + err.Error()})
+			return
+		}
+		var cc struct {
+			Error *struct {
+				Message string `json:"message"`
+			} `json:"error"`
+			Choices []struct {
+				Message agentChatMsg `json:"message"`
+			} `json:"choices"`
+		}
+		decodeErr := json.NewDecoder(resp.Body).Decode(&cc)
+		resp.Body.Close()
+		if decodeErr != nil {
+			a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": "实例响应解析失败: " + decodeErr.Error()})
+			return
+		}
+		if cc.Error != nil {
+			a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": "实例错误: " + cc.Error.Message})
+			return
+		}
+		if len(cc.Choices) == 0 {
+			a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": "实例无响应"})
+			return
+		}
+		msg := cc.Choices[0].Message
+		history = append(history, msg)
+		if len(msg.ToolCalls) == 0 {
+			a.writeJSON(w, http.StatusOK, map[string]any{"content": msg.Content, "messages": history, "rounds": rounds})
+			return
+		}
+		// 执行模型请求的工具并回传真实结果
+		for _, tc := range msg.ToolCalls {
+			callID := tc.ID
+			if callID == "" {
+				callID = fmt.Sprintf("call_%d_%d", rounds, len(history))
+			}
+			result := a.execAgentTool(r.Context(), tc.Function.Name, tc.Function.Arguments)
+			history = append(history, agentChatMsg{Role: "tool", ToolCallID: callID, Name: tc.Function.Name, Content: result})
+		}
+	}
+	a.writeJSON(w, http.StatusOK, map[string]any{"content": "（工具调用次数过多，已停止循环）", "messages": history, "rounds": rounds})
+}
+
 // handleSessions lists sessions (GET /api/sessions).
 func (a *App) handleSessions(w http.ResponseWriter, r *http.Request) {
 	a.writeJSON(w, http.StatusOK, a.sessions.List())
@@ -3781,6 +3955,7 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("POST /api/hf/list", a.handleHFList)
 	mux.HandleFunc("POST /api/hf/download", a.handleHFDownload)
 	mux.HandleFunc("POST /api/debug/proxy", a.handleDebugProxy)
+	mux.HandleFunc("POST /api/agent/chat", a.handleAgentChat)
 	mux.HandleFunc("GET /api/sessions", a.handleSessions)
 	mux.HandleFunc("GET /api/insights", a.handleInsights)
 	mux.HandleFunc("GET /api/mcp", a.handleMCPList)

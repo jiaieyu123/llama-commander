@@ -662,6 +662,120 @@ func (a *App) handleBundleMCPServers(w http.ResponseWriter, r *http.Request) {
 	a.writeJSON(w, http.StatusOK, b.MCPServers)
 }
 
+// matchDraftCandidate is one potential draft model found for a main model.
+type matchDraftCandidate struct {
+	Path         string  `json:"path"`
+	Name         string  `json:"name"`
+	FileSizeMB   float64 `json:"file_size_mb"`
+	Architecture string  `json:"architecture"`
+	Reason       string  `json:"reason"` // 匹配原因：同目录伴生 / 同架构小模型
+	Score        int     `json:"score"`  // 优先级分（越高越优先）
+}
+
+// handleMatchDraft automatically finds a suitable speculative-decoding draft
+// model for a main model (POST /api/bundles/{id}/match-draft). Priority:
+//
+//  1. 主模型同目录下文件名含 draft/mtp 的伴生草稿（天然匹配）
+//  2. 主模型自带 MTP 头 → 无需外部草稿（draft-mtp 模式）
+//  3. 模型库中同架构、且文件更小的带 MTP 头模型（跨模型投机）
+func (a *App) handleMatchDraft(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	b, ok := a.bundles.Get(id)
+	if !ok {
+		a.writeJSON(w, http.StatusNotFound, map[string]string{"error": "模型不存在"})
+		return
+	}
+	mainPath := b.BaseModel.Path
+	mainArch := ""
+	if b.BaseModel.Metadata != nil {
+		mainArch = b.BaseModel.Metadata.Architecture
+	}
+	mainSize := b.BaseModel.FileSizeMB
+
+	var candidates []matchDraftCandidate
+	push := func(c matchDraftCandidate) {
+		// 排除主模型自身与已保存的草稿
+		if c.Path == mainPath {
+			return
+		}
+		for _, x := range candidates {
+			if x.Path == c.Path {
+				return
+			}
+		}
+		candidates = append(candidates, c)
+	}
+
+	// 1) 主模型自带 MTP 头 → draft-mtp 模式，无需外部草稿
+	if bundle.HasMTPHeadByFile(mainPath) {
+		candidates = append(candidates, matchDraftCandidate{
+			Path: "", Name: "（用主模型自带 MTP 头）", Architecture: mainArch,
+			Reason: "主模型自带 MTP 头，用 --spec-type draft-mtp 即可投机，无需外部草稿", Score: 100,
+		})
+	}
+	// 2) 同目录伴生 draft（文件名含 draft）
+	dir := filepath.Dir(mainPath)
+	if entries, err := os.ReadDir(dir); err == nil {
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(strings.ToLower(e.Name()), ".gguf") {
+				continue
+			}
+			lower := strings.ToLower(e.Name())
+			if !strings.Contains(lower, "draft") && !strings.Contains(lower, "mtp") {
+				continue
+			}
+			p := filepath.Join(dir, e.Name())
+			push(matchDraftCandidate{Path: p, Name: e.Name(), Reason: "同目录伴生草稿", Score: 90})
+		}
+	}
+	// 3) 模型库中同架构小模型（带 MTP 头）
+	if mainArch != "" {
+		for _, x := range a.bundles.List() {
+			if x.ID == id || x.BaseModel.Path == mainPath {
+				continue
+			}
+			arch := ""
+			if x.BaseModel.Metadata != nil {
+				arch = x.BaseModel.Metadata.Architecture
+			}
+			if arch != mainArch {
+				continue
+			}
+			// 草稿应比主模型小很多（更快投机）
+			if x.BaseModel.FileSizeMB > 0 && mainSize > 0 && x.BaseModel.FileSizeMB >= mainSize {
+				continue
+			}
+			// 优先带 MTP 头的（nextn 张量），否则用同架构小模型
+			score := 60
+			reason := "同架构小模型（跨模型投机）"
+			if bundle.HasMTPHeadByFile(x.BaseModel.Path) {
+				score = 80
+				reason = "同架构带 MTP 头的小模型"
+			}
+			push(matchDraftCandidate{Path: x.BaseModel.Path, Name: x.Name,
+				FileSizeMB: x.BaseModel.FileSizeMB, Architecture: arch, Reason: reason, Score: score})
+		}
+	}
+	// 按分数降序
+	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].Score > candidates[j].Score })
+	a.writeJSON(w, http.StatusOK, map[string]any{
+		"match":     candidates,
+		"main_arch": mainArch,
+		"main_size": mainSize,
+		"has_mtp":   len(candidates) > 0 && candidates[0].Path == "",
+		"recommend": firstDraftPath(candidates),
+	})
+}
+
+func firstDraftPath(cs []matchDraftCandidate) string {
+	for _, c := range cs {
+		if c.Path != "" {
+			return c.Path
+		}
+	}
+	return ""
+}
+
 // handleBundleConfigs saves a tested configuration to a model (POST
 // /api/bundles/{id}/configs).
 func (a *App) handleBundleConfigs(w http.ResponseWriter, r *http.Request) {
@@ -779,9 +893,7 @@ func (a *App) handleAnalyze(w http.ResponseWriter, r *http.Request) {
 type importRequest struct {
 	Path string `json:"path"`
 	Name string `json:"name"`
-}
-
-// handleImport creates a bundle from a GGUF path (with smart bundling).
+} // handleImport creates a bundle from a GGUF path (with smart bundling).
 func (a *App) handleImport(w http.ResponseWriter, r *http.Request) {
 	var req importRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -4127,6 +4239,7 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("POST /api/bundles/{id}/configs", a.handleBundleConfigs)
 	mux.HandleFunc("DELETE /api/bundles/{id}/configs/{cfgId}", a.handleBundleConfigItem)
 	mux.HandleFunc("PUT /api/bundles/{id}/mcpservers", a.handleBundleMCPServers)
+	mux.HandleFunc("POST /api/bundles/{id}/match-draft", a.handleMatchDraft)
 	mux.HandleFunc("POST /api/parse", a.handleParseGGUF)
 	mux.HandleFunc("POST /api/bundles/analyze", a.handleAnalyze)
 	mux.HandleFunc("POST /api/bundles/import", a.handleImport)

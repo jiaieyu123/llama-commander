@@ -592,6 +592,49 @@
     // 张量被当作 unused tensor 忽略；普通模型需填独立草稿模型才会生效。
     const specEl = $('p-spec_type');
     if (specEl && isMtp && !specEl.checked) specEl.checked = true;
+    // MTP 模型：清空外部草稿路径（用自带头），避免误填跨模型草稿
+    if (isMtp && $('p-model_draft')) $('p-model_draft').value = '';
+
+    // 🔍 自动匹配草稿模型：调用后端按同目录/同架构智能推荐，填入 p-model_draft
+    // 仅在用户未手动填写时自动填；提示显示匹配来源，避免不匹配的草稿导致崩溃。
+    const mdEl = $('p-model_draft');
+    const mdHint = $('model-draft-hint');
+    const alreadySet = mdEl && mdEl.value.trim();
+    api('/api/bundles/' + id + '/match-draft', { method: 'POST', body: '{}' })
+      .then(function (r) {
+        if (!r || !r.match || !r.match.length) {
+          if (mdHint) mdHint.textContent = '';
+          return;
+        }
+        const top = r.match[0];
+        // 主模型自带 MTP 头 → 无需外部草稿
+        if (r.has_mtp || (top && !top.path)) {
+          if (!alreadySet) mdEl.value = '';
+          if (mdHint) mdHint.textContent = '✅ 主模型自带 MTP 头，启用投机即可（draft-mtp），无需外部草稿。';
+          return;
+        }
+        if (alreadySet) {
+          // 用户已手动填草稿 → 校验是否与推荐匹配
+          const cur = mdEl.value.trim().replace(/\\/g, '/');
+          const isRec = (top.path || '').replace(/\\/g, '/') === cur;
+          const sameDir = top.reason && top.reason.indexOf('同目录') === 0;
+          if (isRec || sameDir) {
+            if (mdHint) mdHint.textContent = '✅ 草稿模型匹配（' + (top.reason || '') + '）。';
+          } else {
+            if (mdHint) mdHint.textContent = '⚠️ 当前草稿与推荐不符（推荐: ' + (top.name || top.path) + '），架构不匹配可能导致启动崩溃。建议改用自动匹配值。';
+          }
+          return;
+        }
+        // 未手动填 → 自动填入推荐草稿
+        if (top.path) {
+          mdEl.value = top.path;
+          if (mdHint) mdHint.textContent = '🔍 自动匹配草稿: ' + (top.reason || '') + (top.name ? ' · ' + top.name : '') + '（可手动改）';
+        } else {
+          mdEl.value = '';
+          if (mdHint) mdHint.textContent = '✅ 主模型自带 MTP 头，启用投机即可（draft-mtp），无需外部草稿。';
+        }
+      })
+      .catch(function () { /* 匹配失败不阻塞 */ });
 
     // 用模型默认参数填充表单
     const dp = b.default_params || {};

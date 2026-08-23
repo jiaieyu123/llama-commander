@@ -215,6 +215,8 @@
     $('ak-search-save').addEventListener('click', saveSearchKeys);
     $('ak-brave-key').addEventListener('input', function () { akBraveKeyChanged = true; });
     $('ak-tavily-key').addEventListener('input', function () { akTavilyKeyChanged = true; });
+    // 🔍 草稿模型自动匹配交互（🪄 按钮 / 候选下拉 / 手动输入校验）
+    bindDraftMatchUI();
     // 关闭专属板块 → 停止实时刷新定时器
     document.querySelectorAll('#apikey-modal [data-close]').forEach(function (btn) {
       btn.addEventListener('click', closeAPIKeyModal);
@@ -596,45 +598,7 @@
     if (isMtp && $('p-model_draft')) $('p-model_draft').value = '';
 
     // 🔍 自动匹配草稿模型：调用后端按同目录/同架构智能推荐，填入 p-model_draft
-    // 仅在用户未手动填写时自动填；提示显示匹配来源，避免不匹配的草稿导致崩溃。
-    const mdEl = $('p-model_draft');
-    const mdHint = $('model-draft-hint');
-    const alreadySet = mdEl && mdEl.value.trim();
-    api('/api/bundles/' + id + '/match-draft', { method: 'POST', body: '{}' })
-      .then(function (r) {
-        if (!r || !r.match || !r.match.length) {
-          if (mdHint) mdHint.textContent = '';
-          return;
-        }
-        const top = r.match[0];
-        // 主模型自带 MTP 头 → 无需外部草稿
-        if (r.has_mtp || (top && !top.path)) {
-          if (!alreadySet) mdEl.value = '';
-          if (mdHint) mdHint.textContent = '✅ 主模型自带 MTP 头，启用投机即可（draft-mtp），无需外部草稿。';
-          return;
-        }
-        if (alreadySet) {
-          // 用户已手动填草稿 → 校验是否与推荐匹配
-          const cur = mdEl.value.trim().replace(/\\/g, '/');
-          const isRec = (top.path || '').replace(/\\/g, '/') === cur;
-          const sameDir = top.reason && top.reason.indexOf('同目录') === 0;
-          if (isRec || sameDir) {
-            if (mdHint) mdHint.textContent = '✅ 草稿模型匹配（' + (top.reason || '') + '）。';
-          } else {
-            if (mdHint) mdHint.textContent = '⚠️ 当前草稿与推荐不符（推荐: ' + (top.name || top.path) + '），架构不匹配可能导致启动崩溃。建议改用自动匹配值。';
-          }
-          return;
-        }
-        // 未手动填 → 自动填入推荐草稿
-        if (top.path) {
-          mdEl.value = top.path;
-          if (mdHint) mdHint.textContent = '🔍 自动匹配草稿: ' + (top.reason || '') + (top.name ? ' · ' + top.name : '') + '（可手动改）';
-        } else {
-          mdEl.value = '';
-          if (mdHint) mdHint.textContent = '✅ 主模型自带 MTP 头，启用投机即可（draft-mtp），无需外部草稿。';
-        }
-      })
-      .catch(function () { /* 匹配失败不阻塞 */ });
+    autoMatchDraft(id);
 
     // 用模型默认参数填充表单
     const dp = b.default_params || {};
@@ -709,6 +673,119 @@
       })
       .catch(function (e) { alert('优化失败: ' + e.message); })
       .finally(function () { btn.disabled = false; btn.textContent = '✨ 一键优化'; });
+  }
+
+  // 🔍 自动匹配草稿模型：按主模型同目录/同架构智能推荐，填入 p-model_draft，
+  // 并填充候选下拉（🪄 匹配 按钮 / 下拉选择 均可触发）。手动填了草稿时校验匹配性。
+  function autoMatchDraft(modelId) {
+    if (!modelId) return;
+    const mdEl = $('p-model_draft');
+    const mdHint = $('model-draft-hint');
+    const candSel = $('draft-candidate-select');
+    if (!mdEl || !mdHint) return;
+    api('/api/bundles/' + modelId + '/match-draft', { method: 'POST', body: '{}' })
+      .then(function (r) {
+        if (!r || !r.match || !r.match.length) {
+          mdHint.textContent = '';
+          if (candSel) { candSel.innerHTML = '<option value="">🪄 自动匹配草稿…</option>'; }
+          return;
+        }
+        const top = r.match[0];
+        // 填充候选下拉
+        if (candSel) {
+          const prev = candSel.value;
+          candSel.innerHTML = '<option value="">🪄 自动匹配草稿…</option>';
+          r.match.forEach(function (c) {
+            const o = document.createElement('option');
+            if (c.path) {
+              o.value = c.path;
+              o.textContent = (c.name || c.path.split(/[\\/]/).pop()) + '（' + (c.reason || '') + '）';
+            } else {
+              o.value = '';
+              o.textContent = '（用主模型自带 MTP 头）';
+            }
+            candSel.appendChild(o);
+          });
+          if (prev) candSel.value = prev;
+        }
+        // 主模型自带 MTP 头 → 无需外部草稿
+        if (r.has_mtp || (top && !top.path)) {
+          if (!mdEl.value.trim()) mdEl.value = '';
+          mdHint.textContent = '✅ 主模型自带 MTP 头，启用投机即可（draft-mtp），无需外部草稿。';
+          return;
+        }
+        const alreadySet = mdEl.value.trim();
+        if (alreadySet) {
+          // 用户已手动填草稿 → 校验是否与推荐匹配
+          const cur = alreadySet.replace(/\\/g, '/');
+          const isRec = (top.path || '').replace(/\\/g, '/') === cur;
+          const sameDir = top.reason && top.reason.indexOf('同目录') === 0;
+          if (isRec || sameDir) {
+            mdHint.textContent = '✅ 草稿模型匹配（' + (top.reason || '') + '）。';
+          } else {
+            mdHint.textContent = '⚠️ 当前草稿与推荐不符（推荐: ' + (top.name || top.path) + '），架构不匹配可能导致启动崩溃。建议改用自动匹配值。';
+          }
+          return;
+        }
+        // 未手动填 → 自动填入推荐草稿
+        if (top.path) {
+          mdEl.value = top.path;
+          if (candSel) candSel.value = top.path;
+          mdHint.textContent = '🔍 自动匹配草稿: ' + (top.reason || '') + (top.name ? ' · ' + top.name : '') + '（可手动改）';
+        } else {
+          mdEl.value = '';
+          mdHint.textContent = '✅ 主模型自带 MTP 头，启用投机即可（draft-mtp），无需外部草稿。';
+        }
+      })
+      .catch(function () { /* 匹配失败不阻塞 */ });
+  }
+
+  // 绑定草稿自动匹配的交互：🪄 匹配按钮 + 候选下拉选择
+  function bindDraftMatchUI() {
+    const btn = $('btn-match-draft');
+    if (btn) btn.addEventListener('click', function () {
+      if (!selectedId) { alert('请先选择模型'); return; }
+      // 用户主动点匹配 → 强制用推荐草稿覆盖当前值
+      api('/api/bundles/' + selectedId + '/match-draft', { method: 'POST', body: '{}' })
+        .then(function (r) {
+          const mdEl = $('p-model_draft');
+          const mdHint = $('model-draft-hint');
+          const candSel = $('draft-candidate-select');
+          if (!mdEl || !r || !r.match || !r.match.length) return;
+          const top = r.match[0];
+          if (top && top.path) {
+            mdEl.value = top.path;
+            if (candSel) candSel.value = top.path;
+            if (mdHint) mdHint.textContent = '✅ 已自动匹配草稿: ' + (top.reason || '') + (top.name ? ' · ' + top.name : '');
+          } else {
+            mdEl.value = '';
+            if (mdHint) mdHint.textContent = '✅ 主模型自带 MTP 头，启用投机即可（draft-mtp），无需外部草稿。';
+          }
+          refreshPreview();
+          runAudit();
+          flashBtn(btn, '✓ 已匹配');
+        })
+        .catch(function () { flashBtn(btn, '✗'); });
+    });
+    const sel = $('draft-candidate-select');
+    if (sel) sel.addEventListener('change', function () {
+      const mdEl = $('p-model_draft');
+      const mdHint = $('model-draft-hint');
+      if (!mdEl) return;
+      if (sel.value) {
+        mdEl.value = sel.value;
+        if (mdHint) mdHint.textContent = '✅ 已选择草稿模型（可再点 🪄 匹配 重新推荐）';
+      } else if (selectedId) {
+        autoMatchDraft(selectedId);
+      }
+      refreshPreview();
+      runAudit();
+    });
+    // 手动输入草稿时也触发校验（change 时）
+    const mdEl = $('p-model_draft');
+    if (mdEl) mdEl.addEventListener('change', function () {
+      if (selectedId) autoMatchDraft(selectedId);
+    });
   }
 
   // ── 预设 ──────────────────────────────

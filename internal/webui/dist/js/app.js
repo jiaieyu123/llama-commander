@@ -598,7 +598,8 @@
     if (isMtp && $('p-model_draft')) $('p-model_draft').value = '';
 
     // 🔍 自动匹配草稿模型：调用后端按同目录/同架构智能推荐，填入 p-model_draft
-    autoMatchDraft(id);
+    // applyIfChecked=true：仅当勾选了「启用投机解码」才自动填草稿值，否则留空（不使用）
+    autoMatchDraft(id, true);
 
     // 用模型默认参数填充表单
     const dp = b.default_params || {};
@@ -677,7 +678,8 @@
 
   // 🔍 自动匹配草稿模型：按主模型同目录/同架构智能推荐，填入 p-model_draft，
   // 并填充候选下拉（🪄 匹配 按钮 / 下拉选择 均可触发）。手动填了草稿时校验匹配性。
-  function autoMatchDraft(modelId) {
+  // applyIfChecked=true 时仅在勾选了「启用投机解码」才自动填草稿值；否则只填充候选下拉（草稿留空=不使用）。
+  function autoMatchDraft(modelId, applyIfChecked) {
     if (!modelId) return;
     const mdEl = $('p-model_draft');
     const mdHint = $('model-draft-hint');
@@ -694,7 +696,8 @@
         // 填充候选下拉
         if (candSel) {
           const prev = candSel.value;
-          candSel.innerHTML = '<option value="">🪄 自动匹配草稿…</option>';
+          candSel.innerHTML = '<option value="">🪄 自动匹配草稿…</option>' +
+            '<option value="__none__">🚫 不使用草稿（留空）</option>';
           r.match.forEach(function (c) {
             const o = document.createElement('option');
             if (c.path) {
@@ -712,6 +715,13 @@
         if (r.has_mtp || (top && !top.path)) {
           if (!mdEl.value.trim()) mdEl.value = '';
           mdHint.textContent = '✅ 主模型自带 MTP 头，启用投机即可（draft-mtp），无需外部草稿。';
+          return;
+        }
+        const specOn = $('p-spec_type') ? $('p-spec_type').checked : false;
+        // 未启用投机解码：不自动填草稿值（留空=不使用），只提示
+        if (applyIfChecked && !specOn) {
+          if (mdEl.value === top.path) mdEl.value = '';
+          mdHint.textContent = '💡 未启用投机解码。勾选「🚀 启用投机解码」后将自动匹配草稿；不需要投机可保持留空。';
           return;
         }
         const alreadySet = mdEl.value.trim();
@@ -740,7 +750,7 @@
       .catch(function () { /* 匹配失败不阻塞 */ });
   }
 
-  // 绑定草稿自动匹配的交互：🪄 匹配按钮 + 候选下拉选择
+  // 绑定草稿自动匹配的交互：🪄 匹配按钮 + 候选下拉选择 + 投机开关联动
   function bindDraftMatchUI() {
     const btn = $('btn-match-draft');
     if (btn) btn.addEventListener('click', function () {
@@ -772,11 +782,15 @@
       const mdEl = $('p-model_draft');
       const mdHint = $('model-draft-hint');
       if (!mdEl) return;
-      if (sel.value) {
+      if (sel.value === '__none__') {
+        // 🚫 不使用草稿（留空）
+        mdEl.value = '';
+        if (mdHint) mdHint.textContent = '✅ 已选择不使用草稿模型（投机解码将不启用）。';
+      } else if (sel.value) {
         mdEl.value = sel.value;
         if (mdHint) mdHint.textContent = '✅ 已选择草稿模型（可再点 🪄 匹配 重新推荐）';
       } else if (selectedId) {
-        autoMatchDraft(selectedId);
+        autoMatchDraft(selectedId, false);
       }
       refreshPreview();
       runAudit();
@@ -784,7 +798,22 @@
     // 手动输入草稿时也触发校验（change 时）
     const mdEl = $('p-model_draft');
     if (mdEl) mdEl.addEventListener('change', function () {
-      if (selectedId) autoMatchDraft(selectedId);
+      if (selectedId) autoMatchDraft(selectedId, false);
+    });
+    // 「🚀 启用投机解码」勾选联动：勾选→自动匹配草稿；取消→清空草稿
+    const specEl = $('p-spec_type');
+    if (specEl) specEl.addEventListener('change', function () {
+      if (!selectedId) return;
+      if (specEl.checked) {
+        autoMatchDraft(selectedId, false);
+      } else {
+        const md = $('p-model_draft');
+        if (md) md.value = '';
+        const hint = $('model-draft-hint');
+        if (hint) hint.textContent = '💡 已关闭投机解码，草稿模型已留空。';
+        refreshPreview();
+        runAudit();
+      }
     });
   }
 

@@ -127,7 +127,14 @@
           </div>
           <div class="field"><label>RoPE 缩放因子</label><input type="number" id="p-rope_scale" value="" placeholder="自动" min="0" step="0.1"></div>
           <div class="field"><label>多模态 mmproj</label><input type="text" id="p-mmproj" placeholder="mmproj.gguf 路径（可选）"></div>
-          <div class="field"><label>mmproj 设备</label><input type="text" id="p-mmproj_device" placeholder="留空=自动 / GPU 编号如 0 / none" list="mmproj-device-options" title="留空=自动；多模态投影器设备（none=不卸载到GPU）。注意：不要填 auto（会报 invalid device）"><datalist id="mmproj-device-options"><option value="none"><option value="0"><option value="1"></datalist></div>
+          <div class="field"><label>mmproj 设备</label>
+            <select id="p-mmproj_device" title="多模态投影器（mmproj）加载到哪个设备。留空=自动（推荐）；none=不卸载到GPU（省显存给主模型）；0/1=指定GPU编号。注意：不要选 auto（会报 invalid device）">
+              <option value="">留空 = 自动（推荐）</option>
+              <option value="none">none = 不卸载到 GPU（省显存）</option>
+              <option value="0">0 = 第一块 GPU</option>
+              <option value="1">1 = 第二块 GPU</option>
+            </select>
+          </div>
           <div class="field"><label class="chk"><input type="checkbox" id="p-no_mmproj_offload"> mmproj 走 CPU（省显存给主模型，提速）</label></div>
           <div class="field"><label>并行槽位</label><input type="number" id="p-parallel" value="" placeholder="-1（自动）" min="-1"></div>
           <div class="field"><label class="chk"><input type="checkbox" id="p-embedding"> 嵌入模式</label></div>

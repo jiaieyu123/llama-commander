@@ -2076,7 +2076,7 @@
       });
       div.querySelector('[data-del]').addEventListener('click', function () {
         if (!confirm('删除 MCP 服务器 "' + s.name + '"？')) return;
-        api('/api/mcp/' + s.id, { method: 'DELETE' }).then(loadMCP);
+        api('/api/mcp/' + s.id, { method: 'DELETE' }).then(function () { loadMCP(); loadMCPTemplates(); });
       });
       box.appendChild(div);
     });
@@ -2159,15 +2159,25 @@
 
   // ── 模板库 ─────────────────────────────
   function loadMCPTemplates() {
-    api(API.mcpTemplates).catch(function () { return []; }).then(function (list) {
-      renderMCPTemplates(list || []);
+    // 并行拉取模板 + 已注册服务器（用于标记"已使用"的模板）
+    Promise.all([
+      api(API.mcpTemplates).catch(function () { return []; }),
+      api(API.mcpList).catch(function () { return []; })
+    ]).then(function (r) {
+      renderMCPTemplates(r[0] || [], r[1] || []);
     });
   }
 
-  function renderMCPTemplates(templates) {
+  function renderMCPTemplates(templates, registered) {
     const container = $('mcp-template-list');
     if (!container) return;
     if (!templates.length) { container.innerHTML = '<div class="empty-hint">暂无模板。</div>'; return; }
+    // 已注册的服务器名集合（判断模板是否已添加使用）
+    const usedSet = {};
+    (registered || []).forEach(function (s) { usedSet[s.name] = true; });
+    const isUsed = function (tplId) {
+      return !!(usedSet[tplId] || Object.keys(usedSet).some(function (n) { return n.indexOf(tplId + '-') === 0; }));
+    };
     container.innerHTML = '';
     // 按分类分组展示，推荐排前
     const groups = {};
@@ -2181,14 +2191,17 @@
       const grid = catEl.querySelector('.mcp-tpl-grid');
       groups[cat].sort(function (a, b) { return (b.recommended ? 1 : 0) - (a.recommended ? 1 : 0); })
         .forEach(function (tpl) {
+          const used = isUsed(tpl.id);
           const card = document.createElement('div');
-          card.className = 'mcp-template-card' + (tpl.recommended ? ' recommended' : '');
+          card.className = 'mcp-template-card' + (tpl.recommended ? ' recommended' : '') + (used ? ' used' : '');
           card.innerHTML =
             '<div class="mcp-template-head"><span class="mcp-template-name">' + esc(tpl.name) + '</span>' +
-            (tpl.recommended ? '<span class="badge">推荐</span>' : '') + '</div>' +
+            (tpl.recommended ? '<span class="badge">推荐</span>' : '') +
+            (used ? '<span class="badge used-badge" title="该模板已添加到 MCP 服务器列表">✓ 已使用</span>' : '') + '</div>' +
             '<p class="mcp-template-desc">' + esc(tpl.description) + '</p>' +
             (tpl.hint ? '<p class="mcp-template-hint">💡 ' + esc(tpl.hint) + '</p>' : '') +
-            '<button class="btn small" data-tpl="' + esc(tpl.id) + '">＋ 使用此工具</button>';
+            '<button class="btn small" data-tpl="' + esc(tpl.id) + '"' + (used ? ' disabled' : '') + '>' +
+            (used ? '✓ 已添加' : '＋ 使用此工具') + '</button>';
           card.querySelector('[data-tpl]').addEventListener('click', function () { onAddTemplate(tpl, card); });
           grid.appendChild(card);
         });
@@ -2256,7 +2269,7 @@
 
   function doAddMCPServer(server, cfg, card) {
     api(API.mcpAdd, { method: 'POST', body: JSON.stringify(server) })
-      .then(function () { cfg.remove(); loadMCP(); flashBtn(card.querySelector('[data-tpl]'), '✓ 已添加'); })
+      .then(function () { cfg.remove(); loadMCP(); loadMCPTemplates(); flashBtn(card.querySelector('[data-tpl]'), '✓ 已添加'); })
       .catch(function (e) { alert('添加失败: ' + e.message); });
   }
 

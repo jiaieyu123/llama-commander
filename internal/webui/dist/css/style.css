@@ -440,6 +440,11 @@ select.flash-ok { outline: 2px solid #4caf50; outline-offset: 2px; }
 .mcp-template-card { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; background: #0d1119; transition: border-color 0.2s; }
 .mcp-template-card:hover { border-color: var(--accent); }
 .mcp-template-card.recommended { border-color: rgba(76, 175, 80, 0.5); }
+/* 已添加使用的模板：绿色描边 + 浅绿背景 + 禁用按钮，与未使用明显区分 */
+.mcp-template-card.used { border-color: var(--green); background: rgba(76, 175, 80, 0.08); opacity: 0.85; }
+.mcp-template-card.used .mcp-template-name { color: var(--green); }
+.mcp-template-card.used .badge.used-badge { background: var(--green); color: #fff; padding: 1px 7px; border-radius: 10px; font-size: 10px; flex: none; }
+.mcp-template-card.used button[data-tpl] { opacity: 0.6; cursor: default; }
 .mcp-template-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
 .mcp-template-name { font-size: 13px; font-weight: 600; }
 .mcp-template-card .badge { background: var(--green); color: #fff; padding: 1px 6px; border-radius: 10px; font-size: 10px; flex: none; }

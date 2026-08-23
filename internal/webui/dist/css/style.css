@@ -84,10 +84,26 @@ body {
 .instance-card .port { font-family: monospace; color: var(--accent); }
 .instance-card .meta { color: var(--muted); font-size: 12px; margin: 4px 0 8px; }
 .instance-card .actions { display: flex; gap: 6px; }
+.instance-card .api-ep { display: flex; align-items: center; gap: 6px; margin: 4px 0; }
+.instance-card .api-ep-url,
+.instance-card .api-ep-key { font-family: monospace; font-size: 11px; color: var(--accent); background: rgba(127,127,127,.1); padding: 2px 6px; border-radius: 5px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.instance-card .api-ep-key { color: var(--muted); }
+.api-ep-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.api-ep-dot.ok { background: var(--green); box-shadow: 0 0 6px rgba(76,175,80,.6); }
+.api-ep-dot.pending { background: #f0a45e; box-shadow: 0 0 6px rgba(240,164,94,.5); }
+.api-ep-dot.off { background: var(--red); box-shadow: 0 0 6px rgba(239,83,80,.5); }
+.api-ep-dot.key { width: auto; height: auto; background: none; box-shadow: none; font-size: 11px; }
 
 /* ── 配置 ─────────────────────────────── */
 .cfg-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
 .cfg-row label { color: var(--muted); }
+/* 测试配置下拉：固定合理宽度（不要占满整行，也不要被压成只剩箭头） */
+#cfg-row-configs { flex-wrap: wrap; }
+#test-config-select { flex: 0 1 auto; width: 300px; min-width: 180px; max-width: 380px; }
+/* 场景预设/添加参数下拉：固定最小宽度防止缩成一条，应用成功时绿色高亮反馈 */
+#scenario-preset { min-width: 190px; }
+#sweep-add-param { min-width: 240px; }
+select.flash-ok { outline: 2px solid #4caf50; outline-offset: 2px; }
 .cfg-meta { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
 .cfg-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
 .cfg-group { border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px; margin: 0; min-width: 0; }
@@ -138,6 +154,22 @@ body {
 .req-history { margin-top: 8px; max-height: 140px; overflow-y: auto; font-size: 12px; }
 .req-row { padding: 3px 8px; border-radius: 6px; margin-bottom: 3px; background: rgba(127,127,127,.07); color: var(--muted); font-family: monospace; }
 .req-time { color: var(--green); margin-right: 4px; }
+
+/* ── 🔑 全局 API Key 专属板块 ─────────── */
+.ak-sys-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.ak-sys-card { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border: 1px solid var(--border, #333); border-radius: 10px; background: rgba(20,22,28,.4); }
+.ak-sys-label { color: var(--muted); font-size: 12px; }
+.ak-sys-val { font-size: 14px; font-weight: 600; word-break: break-all; }
+.ak-bar-row { display: flex; align-items: center; gap: 10px; margin-top: 10px; font-size: 12px; }
+.ak-bar-label { color: var(--muted); white-space: nowrap; flex: none; }
+.ak-bar { flex: 1; height: 10px; border-radius: 6px; background: rgba(127,127,127,.15); overflow: hidden; min-width: 80px; }
+.ak-bar-fill { height: 100%; border-radius: 6px; background: linear-gradient(90deg, #6366f1, #8b5cf6); transition: width .5s ease; }
+.ak-bar-num { color: var(--muted); white-space: nowrap; flex: none; font-variant-numeric: tabular-nums; }
+.ak-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin-top: 12px; }
+.ak-stat { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 10px 8px; border: 1px solid var(--border, #333); border-radius: 10px; background: linear-gradient(180deg, rgba(99,102,241,.08), transparent); }
+.ak-stat-v { font-size: 18px; font-weight: 700; color: var(--accent, #6366f1); font-variant-numeric: tabular-nums; }
+.ak-stat-l { color: var(--muted); font-size: 11px; text-align: center; }
+.ak-stats .empty-hint { grid-column: 1 / -1; }
 
 /* ── 日志 ─────────────────────────────── */
 .log-tools { display: flex; gap: 6px; align-items: center; }
@@ -322,6 +354,7 @@ body {
 .help-text { color: var(--text); font-size: 13px; line-height: 1.6; margin-top: 6px; }
 
 /* ── 批量测试 ─────────────────────── */
+.test-model-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .test-model-list { max-height: 180px; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; margin-bottom: 10px; }
 .test-model-row { display: flex; align-items: center; gap: 8px; padding: 3px 2px; font-size: 13px; }
 .test-model-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -344,7 +377,7 @@ body {
 
 /* 参数扫描 */
 #sweep-params { max-height: 320px; overflow-y: auto; padding-right: 4px; margin-bottom: 4px; }
-.sweep-row { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px dashed var(--border); }
+.sweep-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px dashed var(--border); }
 .sweep-label { width: 118px; flex: none; font-size: 13px; display: flex; flex-direction: column; }
 .sweep-hint { color: var(--muted); font-size: 11px; font-style: normal; }
 .sweep-mode { width: 20px; flex: none; font-size: 13px; text-align: center; }
@@ -418,6 +451,7 @@ body {
 .mcp-dot.ok { background: var(--green); }
 .mcp-dot.bad { background: var(--red); }
 .mcp-dot.off { background: var(--muted); }
+.mcp-dot.warn { width: auto; height: auto; background: none; font-size: 12px; }
 .mcp-test-result { font-size: 12px; margin-left: 6px; }
 .mcp-test-result.ok { color: var(--green); }
 .mcp-test-result.err { color: var(--red); }

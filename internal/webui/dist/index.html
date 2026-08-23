@@ -32,6 +32,7 @@
     <div class="sidebar-tools">
       <button class="btn side-tool" id="btn-library" title="模型库"><span class="st-ic">📦</span>模型库</button>
       <button class="btn side-tool" id="btn-monitor" title="实时监控（输入/输出 token、速率、并发，含外部 API 调用）"><span class="st-ic">📡</span>监控</button>
+      <button class="btn side-tool" id="btn-apikey" title="全局 API Key 管理与实时监控（系统资源 / 实例指标）"><span class="st-ic">🔑</span>全局 API</button>
       <button class="btn side-tool" id="btn-test" title="批量测试模型 / 参数扫描"><span class="st-ic">🧪</span>测试</button>
       <button class="btn side-tool" id="btn-insights" title="使用洞察"><span class="st-ic">📊</span>洞察</button>
       <button class="btn side-tool" id="btn-mcp" title="工具扩展（MCP）"><span class="st-ic">🧩</span>MCP</button>
@@ -126,6 +127,7 @@
           </div>
           <div class="field"><label>RoPE 缩放因子</label><input type="number" id="p-rope_scale" value="" placeholder="自动" min="0" step="0.1"></div>
           <div class="field"><label>多模态 mmproj</label><input type="text" id="p-mmproj" placeholder="mmproj.gguf 路径（可选）"></div>
+          <div class="field"><label>mmproj 设备</label><input type="text" id="p-mmproj_device" placeholder="auto（默认）/ GPU 编号，如 0 / none" list="mmproj-device-options"><datalist id="mmproj-device-options"><option value="auto"><option value="none"><option value="0"><option value="1"></datalist></div>
           <div class="field"><label class="chk"><input type="checkbox" id="p-no_mmproj_offload"> mmproj 走 CPU（省显存给主模型，提速）</label></div>
           <div class="field"><label>并行槽位</label><input type="number" id="p-parallel" value="" placeholder="-1（自动）" min="-1"></div>
           <div class="field"><label class="chk"><input type="checkbox" id="p-embedding"> 嵌入模式</label></div>
@@ -381,6 +383,49 @@
     </div>
   </div>
 
+  <!-- 全局 API Key 专属板块（API Key 管理 + 系统资源 + 实例实时监控） -->
+  <div class="modal-overlay" id="apikey-modal" hidden>
+    <div class="modal modal-wide">
+      <div class="modal-head">
+        <h3>🔑 全局 API Key 与实时监控</h3>
+        <button class="btn small" id="ak-refresh" title="刷新">🔄</button>
+        <button class="btn small" data-close>✕</button>
+      </div>
+      <div class="modal-body">
+        <!-- API Key 管理 -->
+        <fieldset class="cfg-group">
+          <legend>🔐 全局 API Key（所有实例自动注入）</legend>
+          <div class="field">
+            <label>API Key</label>
+            <input type="password" id="ak-api-key" placeholder="可选，AES-256 加密存储" autocomplete="new-password">
+            <button class="btn small" id="ak-key-gen" title="自动生成随机 API Key">🎲 生成</button>
+            <button class="btn small" id="ak-key-copy" title="复制到剪贴板">📋</button>
+            <button class="btn small" id="ak-key-toggle" title="显示/隐藏（已保存时点击查看明文）">👁</button>
+            <button class="btn small" id="ak-key-clear" title="清除已存 Key">🗑</button>
+            <button class="btn primary small" id="ak-key-save" title="保存 API Key 设置">💾 保存</button>
+          </div>
+          <div class="modal-info" id="ak-key-hint"></div>
+        </fieldset>
+
+        <!-- 系统资源（实时） -->
+        <fieldset class="cfg-group" style="margin-top:12px">
+          <legend>🖥 系统资源（实时）</legend>
+          <div id="ak-sys" class="ak-sys"><div class="empty-hint">⏳ 正在读取系统资源…</div></div>
+        </fieldset>
+
+        <!-- 全局统计 -->
+        <div id="ak-stats" class="ak-stats"></div>
+
+        <!-- 实例实时监控 -->
+        <div class="monitor-hint" style="margin:12px 0 6px">📡 实例实时监控（数据来自各实例 <code>/metrics</code>，包含外部 API 调用，每 5 秒自动刷新）</div>
+        <div id="apikey-monitor" class="monitor-body">
+          <div class="empty-hint">暂无运行实例。启动模型后这里会实时显示输入/输出 token、速率、并发槽位与 KV 占用。</div>
+        </div>
+      </div>
+      <div class="modal-foot"><button class="btn" data-close>关闭</button></div>
+    </div>
+  </div>
+
   <!-- API 调试弹窗 -->
   <div class="modal-overlay" id="debug-modal" hidden>
     <div class="modal modal-wide">
@@ -502,14 +547,7 @@
         <div class="field"><label>日志保留(天)</label><input type="number" id="set-retention" min="1" max="365" value="30"></div>
         <div class="field"><label>HF 镜像端点</label><input type="text" id="set-hf" placeholder="留空 = huggingface.co，可填 https://hf-mirror.com"></div>
         <div class="field"><label>模型缓存目录</label><input type="text" id="set-cache-dir" placeholder="留空 = 默认 ~/.cache/llama.cpp" title="llama.cpp 的 HF 下载缓存目录。用 📂 浏览选一个父目录后，会自动在其下追加 \\llama-cache 作为缓存子目录（避免缓存堆在所选目录根）；也可直接手填完整路径。留空使用默认 C:\Users\long\.cache\llama.cpp"><button class="btn small" id="set-cache-browse" title="浏览选择目录（自动追加 llama-cache 子目录）">📂 浏览</button></div>
-        <div class="field"><label>全局 API Key（所有实例自动注入）</label>
-          <input type="password" id="set-api-key" placeholder="可选，AES-256 加密存储" autocomplete="new-password">
-          <button class="btn small" id="set-key-gen" title="自动生成随机 API Key">🎲 生成</button>
-          <button class="btn small" id="set-key-copy" title="复制到剪贴板">📋</button>
-          <button class="btn small" id="set-key-toggle" title="显示/隐藏（已保存时点击查看明文）">👁</button>
-          <button class="btn small" id="set-key-clear" title="清除已存 Key">🗑</button>
-        </div>
-        <div class="modal-info" id="set-key-hint"></div>
+        <div class="modal-info" style="margin:6px 0 0">🔑 全局 API Key 已移至侧边栏「<b>🔑 全局 API</b>」板块管理（含系统资源与实例实时监控）。</div>
 
         <fieldset class="cfg-group" style="margin-top:12px">
           <legend>🎨 界面设置（即时生效，自动保存）</legend>
@@ -586,6 +624,11 @@
             <div class="modal-info" style="margin:2px 0 4px">留空 = 默认（ctx 固定 1024 便于横向对比；GPU 层数跟随模型默认）。参数应用到所有勾选模型。</div>
           </div>
           <div class="modal-info" style="margin:4px 0 8px">每个模型会依次启动 → 发一条测试消息 → 自动停止。大模型加载较慢，可随时「⏹ 取消」。</div>
+          <div class="test-model-toolbar">
+            <span class="modal-info" style="flex:1" id="test-model-count">已选 0/0 个模型</span>
+            <button class="btn tiny" id="btn-test-selectall" type="button" title="勾选全部模型">✅ 全选</button>
+            <button class="btn tiny" id="btn-test-selectnone" type="button" title="取消全部勾选">🚫 取消选择</button>
+          </div>
           <div id="test-models" class="test-model-list"></div>
           <div id="test-chart" class="test-chart" style="height:200px;display:none"></div>
           <div id="test-result"></div>

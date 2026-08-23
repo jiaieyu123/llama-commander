@@ -303,6 +303,27 @@ func (m *Manager) Get(id string) (*Bundle, bool) {
 	return b, ok
 }
 
+// FindByPath returns the existing bundle whose base model path matches the
+// given file path (case-insensitive, path-normalized). Used to reject
+// duplicate imports so re-scanning a folder never re-adds the same model.
+func (m *Manager) FindByPath(path string) (*Bundle, bool) {
+	if path == "" {
+		return nil, false
+	}
+	lower := strings.ToLower(filepath.Clean(path))
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, b := range m.bundles {
+		if b.BaseModel.Path == "" {
+			continue
+		}
+		if strings.ToLower(filepath.Clean(b.BaseModel.Path)) == lower {
+			return b, true
+		}
+	}
+	return nil, false
+}
+
 // Add stores a new bundle, assigning ID/timestamps if empty.
 func (m *Manager) Add(b *Bundle) error {
 	if b == nil {

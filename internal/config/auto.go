@@ -227,11 +227,8 @@ func EstimateVRAM(spec ModelSpec, ngl int, ctx int, h *HardwareInfo) float64 {
 	return EstimateVRAMEx(spec, ngl, ctx, h, "f16", "f16", false)
 }
 
-// systemRAMMB returns total physical RAM in MB (Windows only).
-func systemRAMMB() uint64 {
-	// Kept simple for the skeleton; wired to sysinfo in a later phase.
-	return 0
-}
+// systemRAMMB 由平台文件提供：auto_windows.go（GlobalMemoryStatusEx）/
+// auto_other.go（非 Windows 占位 0）。
 
 // ---- nvidia-smi integration ----
 

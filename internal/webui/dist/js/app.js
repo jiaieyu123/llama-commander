@@ -73,6 +73,15 @@
     btn.textContent = text;
     setTimeout(function () { btn.textContent = old; }, 1200);
   }
+  // 对 <select> 的“闪一下”反馈：绝不能像按钮那样改 textContent（会清空所有
+  // <option>，导致下拉框无法再选择且缩成一条），改用临时 CSS 高亮 class。
+  function flashSelect(sel) {
+    if (!sel) return;
+    sel.classList.remove('flash-ok');
+    void sel.offsetWidth; // 强制重排以重新触发动画
+    sel.classList.add('flash-ok');
+    setTimeout(function () { sel.classList.remove('flash-ok'); }, 1200);
+  }
   function fallbackCopy(txt) {
     const ta = document.createElement('textarea');
     ta.value = txt;
@@ -96,8 +105,6 @@
       api(API.configKey).then(function (r) {
         input.value = r.key || '';
         input.type = 'text'; btn.textContent = '🙈';
-        const hint = $('set-key-hint');
-        if (hint) hint.textContent = '🔓 已回显明文（点击 💾 保存将重新加密存储）';
       }).catch(function () { flashBtn(btn, '✗'); });
       return;
     }
@@ -173,11 +180,37 @@
     $('mcp-add').addEventListener('click', addMCP);
     $('btn-settings').addEventListener('click', openSettings);
     $('set-save').addEventListener('click', saveSettings);
-    $('set-key-clear').addEventListener('click', clearAPIKey);
-    $('set-key-gen').addEventListener('click', function () {
-      $('set-api-key').value = genAPIKey();
-      cfgAPIKeyChanged = true;
-      $('set-key-hint').textContent = '🎲 已生成随机 Key（256 位），点击 💾 保存后自动注入到每个实例。';
+    // ── 🔑 全局 API Key 专属板块 ──────────
+    $('btn-apikey').addEventListener('click', openAPIKeyModal);
+    $('ak-refresh').addEventListener('click', function () { loadAPIKeyState(); loadSysResource(); renderAPIKeyMonitor(); });
+    $('ak-key-gen').addEventListener('click', function () {
+      $('ak-api-key').value = genAPIKey();
+      akAPIKeyChanged = true;
+      $('ak-key-hint').textContent = '🎲 已生成随机 Key（256 位），点击 💾 保存后自动注入到每个实例。';
+    });
+    $('ak-key-copy').addEventListener('click', function () {
+      const kInput = $('ak-api-key');
+      if (!kInput.value && cfgHasAPIKey) {
+        // 已保存但未回显 → 拉取明文直接复制
+        api(API.configKey).then(function (r) {
+          if (r.key) copyKey(r.key, $('ak-key-copy'));
+          else flashBtn($('ak-key-copy'), '空');
+        }).catch(function () { flashBtn($('ak-key-copy'), '✗'); });
+      } else {
+        copyKey(kInput.value, this);
+      }
+    });
+    $('ak-key-toggle').addEventListener('click', akToggleVisibility);
+    $('ak-key-clear').addEventListener('click', function () {
+      akAPIKeyChanged = true;
+      $('ak-api-key').value = '';
+      $('ak-key-hint').textContent = '🔓 保存后将清除已存 API Key';
+    });
+    $('ak-key-save').addEventListener('click', saveAPIKey);
+    $('ak-api-key').addEventListener('input', function () { akAPIKeyChanged = true; });
+    // 关闭专属板块 → 停止实时刷新定时器
+    document.querySelectorAll('#apikey-modal [data-close]').forEach(function (btn) {
+      btn.addEventListener('click', closeAPIKeyModal);
     });
     $('p-key-gen').addEventListener('click', function () {
       $('p-api_key').value = genAPIKey();
@@ -185,20 +218,6 @@
     });
     $('p-key-copy').addEventListener('click', function () { copyKey($('p-api_key').value, this); });
     $('p-key-toggle').addEventListener('click', function () { toggleKeyVisibility($('p-api_key'), this); });
-    $('set-key-copy').addEventListener('click', function () {
-      const kInput = $('set-api-key');
-      if (!kInput.value && cfgHasAPIKey) {
-        // 已保存但未回显 → 拉取明文直接复制
-        api(API.configKey).then(function (r) {
-          if (r.key) copyKey(r.key, $('set-key-copy'));
-          else flashBtn($('set-key-copy'), '空');
-        }).catch(function () { flashBtn($('set-key-copy'), '✗'); });
-      } else {
-        copyKey(kInput.value, this);
-      }
-    });
-    $('set-key-toggle').addEventListener('click', function () { toggleKeyVisibility($('set-api-key'), this); });
-    $('set-api-key').addEventListener('input', function () { cfgAPIKeyChanged = true; });
     $('btn-drawer-close').addEventListener('click', closeLibrary);
     $('btn-scan-dir').addEventListener('click', openScanModal);
     $('btn-test').addEventListener('click', openTestModal);
@@ -212,6 +231,11 @@
     $('btn-hist-clear').addEventListener('click', clearTestHistory);
     $('btn-hist-refresh').addEventListener('click', renderTestHistory);
     $('test-start').addEventListener('click', onTestStart);
+    $('btn-test-selectall').addEventListener('click', selectAllTestModels);
+    $('btn-test-selectnone').addEventListener('click', clearTestModels);
+    $('test-models').addEventListener('change', function (e) {
+      if (e.target && e.target.classList && e.target.classList.contains('tm')) updateTestModelCount();
+    });
     $('test-savecfg').addEventListener('click', saveBestConfig);
     $('savecfg-confirm').addEventListener('click', saveConfigNow);
     $('savecfg-cancel').addEventListener('click', function () {
@@ -727,23 +751,28 @@
   }
 
   // 场景预设：对话/代码/长文档/省显存/高速 一键填常用参数组合
+  // （按 RTX 3060 Ti 8GB + 16 核 CPU 设计；n_gpu_layers -1 = auto 自动卸载到显存可容纳）
   const SCENARIO_PRESETS = {
-    chat: { ctx_size: 4096, batch_size: 2048, flash_attn: 'on', cache_type_k: 'f16', cache_type_v: 'f16' },
-    code: { ctx_size: 8192, batch_size: 4096, flash_attn: 'on', cache_type_k: 'f16', cache_type_v: 'f16', temperature: 0.2 },
-    doc:  { ctx_size: 32768, batch_size: 1024, flash_attn: 'on', cache_type_k: 'q8_0', cache_type_v: 'q8_0', temperature: 0.1 },
-    vram: { ctx_size: 2048, batch_size: 512, flash_attn: 'on', cache_type_k: 'q8_0', cache_type_v: 'q8_0', kv_unified: true },
-    fast: { ctx_size: 4096, batch_size: 8192, flash_attn: 'on', cache_type_k: 'f16', cache_type_v: 'f16', parallel: 4 }
+    chat: { n_gpu_layers: 0, ctx_size: 8192, batch_size: 2048, flash_attn: 'on', cache_type_k: 'f16', cache_type_v: 'f16' },
+    code: { n_gpu_layers: 0, ctx_size: 16384, batch_size: 2048, flash_attn: 'on', cache_type_k: 'f16', cache_type_v: 'f16', temperature: 0.2, top_p: 0.9 },
+    doc:  { n_gpu_layers: 0, ctx_size: 32768, batch_size: 1024, flash_attn: 'on', cache_type_k: 'q8_0', cache_type_v: 'q8_0', temperature: 0.1 },
+    vram: { n_gpu_layers: 8, ctx_size: 4096, batch_size: 1024, ubatch_size: 256, flash_attn: 'on', cache_type_k: 'q8_0', cache_type_v: 'q8_0', kv_unified: true },
+    fast: { n_gpu_layers: -1, ctx_size: 4096, batch_size: 4096, ubatch_size: 1024, flash_attn: 'on', parallel: 1 }
   };
   function applyScenarioPreset(name) {
     const p = SCENARIO_PRESETS[name];
     if (!p) return;
     Object.keys(p).forEach(function (k) {
       const el = $('p-' + k);
-      if (el && p[k] !== undefined) el.value = p[k];
+      if (!el || p[k] === undefined) return;
+      if (el.type === 'checkbox') el.checked = !!p[k];
+      else el.value = p[k];
     });
     refreshPreview();
     if (typeof scheduleAudit === 'function') scheduleAudit();
-    flashBtn($('scenario-preset'), '✓ 已应用');
+    // 注意：绝不能对 <select> 调 flashBtn —— textContent 赋值会清空所有 <option>，
+    // 导致下拉框无法再选择且缩成一条。改用临时高亮反馈。
+    flashSelect($('scenario-preset'));
   }
 
   // 主区域 Tab 切换：显示对应 data-mtab 的面板，隐藏其它
@@ -813,7 +842,7 @@
   function collectParams() {
     const p = {};
     ['n_gpu_layers', 'ctx_size', 'threads', 'batch_size', 'ubatch_size', 'threads_batch', 'flash_attn', 'cache_type_k',
-     'cache_type_v', 'rope_scaling', 'rope_scale', 'mmproj', 'no_mmproj_offload', 'parallel', 'embedding', 'rerank',
+     'cache_type_v', 'rope_scaling', 'rope_scale', 'mmproj', 'mmproj_device', 'no_mmproj_offload', 'parallel', 'embedding', 'rerank',
      'cache_ram', 'ctx_checkpoints', 'checkpoint_min_step', 'kv_unified', 'threads_http',
      'metrics', 'props', 'slots', 'repeat_penalty', 'presence_penalty', 'frequency_penalty',
      'temperature', 'top_p', 'top_k', 'min_p', 'samplers', 'sampler_seq', 'seed', 'ignore_eos', 'load_mode', 'numa',
@@ -977,20 +1006,61 @@
       box.innerHTML = '<div class="empty-hint">暂无运行实例。请在下方选择模型并点击 ▶ 启动。</div>';
       return;
     }
+    // 拉取实时健康状态（哪些实例的 /metrics 已有数据 → API 在线），
+    // 不依赖前端跨域，直接用后端 /api/monitor 的存活数据。
+    api('/api/monitor').then(function (r) {
+      const healthy = {};
+      (r.instances || []).forEach(function (it) {
+        const m = it.metrics;
+        healthy[it.session_id] = !!(m && (typeof m.n_predicted_tokens_total === 'number' || typeof m.n_prompt_tokens_total === 'number'));
+      });
+      renderInstanceCards(box, runningSessions, healthy);
+    }).catch(function () {
+      renderInstanceCards(box, runningSessions, {});
+    });
+  }
+
+  // 从实例命令行解析注入的 API Key（--api-key xxx）
+  function sessionAPIKey(s) {
+    const args = s.cmdline_args || [];
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === '--api-key' && i + 1 < args.length) return args[i + 1];
+    }
+    return '';
+  }
+
+  function renderInstanceCards(box, sessions, healthy) {
     box.innerHTML = '';
-    runningSessions.forEach(function (s) {
+    sessions.forEach(function (s) {
       const b = bundles.find(x => x.id === s.bundle_id);
       const div = document.createElement('div');
       div.className = 'instance-card';
+      const baseUrl = 'http://127.0.0.1:' + s.port;
+      const apiKey = sessionAPIKey(s);
+      // 连接状态：crashed → 离线红点；running 且 /metrics 有数据 → 在线绿点；否则 → 连接中黄点
+      let dotCls, dotTitle;
+      if (s.status === 'crashed') { dotCls = 'off'; dotTitle = '实例已退出，API 不可用'; }
+      else if (healthy[s.id]) { dotCls = 'ok'; dotTitle = 'API 在线，外部程序可正常对接'; }
+      else { dotCls = 'pending'; dotTitle = '启动中 / 连接中（API 尚未就绪）'; }
       div.innerHTML = `
         <div class="status ${esc(s.status)}">${dot(s.status)} ${esc(s.status)}  PID: ${s.pid || '-'}</div>
         <div class="port">:${s.port}</div>
         <div class="meta">${esc(b ? b.name : s.bundle_id)}</div>
         <div class="meta">⏱ <b data-uptime="${esc(s.id)}" data-start="${esc(s.start_time)}" data-status="${esc(s.status)}">--</b></div>
+        <div class="api-ep" title="${esc(dotTitle)}">
+          <span class="api-ep-dot ${dotCls}"></span>
+          <code class="api-ep-url">${baseUrl}</code>
+          <button class="btn tiny" data-copy-api="${baseUrl}" title="复制 OpenAI 兼容 API 接入地址">📋 复制</button>
+        </div>${apiKey ? `
+        <div class="api-ep" title="本实例的 API Key（外部程序调用时放入 Authorization: Bearer 头）">
+          <span class="api-ep-dot key">🔑</span>
+          <code class="api-ep-key">${esc(apiKey)}</code>
+          <button class="btn tiny" data-copy-key="${esc(apiKey)}" title="复制 API Key">📋 复制</button>
+        </div>` : ''}
         <div class="actions">
           <button class="btn small" data-stop="${esc(s.id)}">⏹ 停止</button>
           <button class="btn small" data-restart="${esc(s.id)}">🔄 重启</button>
-          <button class="btn small" data-open="http://127.0.0.1:${s.port}">🔗 打开</button>
+          <button class="btn small" data-open="${baseUrl}">🔗 打开</button>
         </div>`;
       div.querySelector('[data-stop]').addEventListener('click', function () {
         api('/api/sessions/' + s.id + '/stop', { method: 'POST' })
@@ -1005,6 +1075,13 @@
       });
       div.querySelector('[data-open]').addEventListener('click', function () {
         window.open(this.dataset.open, '_blank');
+      });
+      div.querySelector('[data-copy-api]').addEventListener('click', function () {
+        copyKey(this.dataset.copyApi, this);
+      });
+      const keyBtn = div.querySelector('[data-copy-key]');
+      if (keyBtn) keyBtn.addEventListener('click', function () {
+        copyKey(this.dataset.copyKey, this);
       });
       box.appendChild(div);
     });
@@ -1144,17 +1221,25 @@
     if (!selected.length) return;
     const btn = $('scan-import');
     btn.disabled = true; btn.textContent = '⏳ 导入中…';
+    // 逐个导入并区分：成功 / 已存在（跳过）/ 失败，避免一个重复项中断整批。
+    let ok = 0, dup = 0, failed = 0;
     const jobs = selected.map(function (c) {
-      return api(API.import, { method: 'POST', body: JSON.stringify({ path: c.bundle.base_model.path, name: c.bundle.name }) });
+      return api(API.import, { method: 'POST', body: JSON.stringify({ path: c.bundle.base_model.path, name: c.bundle.name }) })
+        .then(function () { ok++; })
+        .catch(function (e) {
+          if (e && e.message && e.message.indexOf('已在模型库') >= 0) dup++;
+          else failed++;
+        });
     });
-    Promise.all(jobs)
-      .then(function () {
+    Promise.all(jobs).then(function () {
         $('scan-modal').hidden = true;
         refreshBundles();
-        alert('✅ 已批量导入 ' + selected.length + ' 个模型');
-      })
-      .catch(function (e) { alert('部分导入失败: ' + e.message); refreshBundles(); })
-      .finally(function () { btn.disabled = false; btn.textContent = '📥 批量导入选中'; });
+        const parts = [];
+        if (ok) parts.push('✅ 导入 ' + ok + ' 个');
+        if (dup) parts.push('⏭ 跳过已存在 ' + dup + ' 个');
+        if (failed) parts.push('❌ 失败 ' + failed + ' 个');
+        alert(parts.length ? '完成：' + parts.join(' · ') : '没有新增模型（全部已在模型库）');
+      });
   }
 
   // ── HF 下载 ────────────────────────────
@@ -1923,15 +2008,21 @@
     box.innerHTML = '';
     list.forEach(function (s) {
       const st = byId[s.id] || {};
+      // 环境变量缺失检查（如 BRAVE_API_KEY 为空 → 工具能注册但调用必然失败）
+      const missingEnv = Object.keys(s.env || {}).filter(function (k) { return (s.env[k] || '').trim() === ''; });
       const dot = s.enabled
         ? (st.healthy === false ? '<span class="mcp-dot bad" title="命令不在 PATH，可能无法启动"></span>' : '<span class="mcp-dot ok" title="命令可执行"></span>')
         : '<span class="mcp-dot off" title="已停用"></span>';
+      const envWarn = missingEnv.length
+        ? '<span class="mcp-dot warn" title="缺少环境变量: ' + esc(missingEnv.join(', ')) + '（工具可能无法正常调用）">⚠️</span>'
+        : '';
       const div = document.createElement('div');
       div.className = 'scan-item';
       div.innerHTML =
         '<div>' +
-        '<div class="name">' + dot + ' ' + esc(s.name) + (s.enabled ? '' : ' (停用)') + '</div>' +
+        '<div class="name">' + dot + ' ' + envWarn + ' ' + esc(s.name) + (s.enabled ? '' : ' (停用)') + '</div>' +
         '<div class="meta">命令: ' + esc(s.command) + ' ' + esc((s.args || []).join(' ')) + '</div>' +
+        (missingEnv.length ? '<div class="meta" style="color:#f0a45e">⚠️ 缺少环境变量: ' + esc(missingEnv.join(', ')) + '（需在添加时填写，否则工具调用会失败）</div>' : '') +
         '<div class="actions" style="margin-top:6px;display:flex;gap:6px">' +
         '<button class="btn small" data-test="' + esc(s.id) + '">🧪 测试</button>' +
         '<button class="btn small" data-bind="' + esc(s.id) + '">🔗 绑定模型</button>' +
@@ -1952,13 +2043,19 @@
     });
   }
 
-  // 🧪 测试 MCP 命令能否启动（启动后立即终止）
+  // 🧪 测试 MCP 服务（真实 stdio 握手 initialize + tools/list，非仅启动）
   function testMCP(s, resEl) {
     if (!resEl) return;
     resEl.textContent = '⏳ 测试中…';
     api(API.mcpTest, { method: 'POST', body: JSON.stringify({ command: s.command, args: s.args || [], env: s.env || {} }) })
       .then(function (r) {
-        resEl.textContent = r.ok ? '✅ 可执行' : '❌ ' + (r.message || '失败');
+        if (r.ok) {
+          const tools = (r.tools || []).slice(0, 12).join('、');
+          resEl.textContent = '✅ ' + r.count + ' 个工具' + (tools ? '：' + tools : '');
+        } else {
+          resEl.textContent = '❌ ' + (r.message || '失败');
+        }
+        resEl.title = r.message || '';
         resEl.className = 'mcp-test-result ' + (r.ok ? 'ok' : 'err');
       })
       .catch(function (e) { resEl.textContent = '❌ ' + e.message; resEl.className = 'mcp-test-result err'; });
@@ -2102,11 +2199,26 @@
         env: env,
         enabled: true
       };
-      api(API.mcpAdd, { method: 'POST', body: JSON.stringify(server) })
-        .then(function () { cfg.remove(); loadMCP(); flashBtn(card.querySelector('[data-tpl]'), '✓ 已添加'); })
-        .catch(function (e) { alert('添加失败: ' + e.message); });
+      // 内置子命令模板用 {launcher} 占位符 → 替换为 llama-launcher.exe 绝对路径
+      if (server.command.indexOf('{launcher}') >= 0 || server.args.some(function (a) { return a.indexOf('{launcher}') >= 0; })) {
+        api(API.system).then(function (r) {
+          const lp = (r.launcher_path || '').replace(/\\/g, '/');
+          if (!lp) { alert('无法获取 llama-launcher 路径'); return; }
+          server.command = server.command.replace(/{launcher}/g, lp);
+          server.args = server.args.map(function (a) { return a.replace(/{launcher}/g, lp); });
+          doAddMCPServer(server, cfg, card);
+        }).catch(function () { alert('无法获取 llama-launcher 路径'); });
+      } else {
+        doAddMCPServer(server, cfg, card);
+      }
     });
     card.appendChild(cfg);
+  }
+
+  function doAddMCPServer(server, cfg, card) {
+    api(API.mcpAdd, { method: 'POST', body: JSON.stringify(server) })
+      .then(function () { cfg.remove(); loadMCP(); flashBtn(card.querySelector('[data-tpl]'), '✓ 已添加'); })
+      .catch(function (e) { alert('添加失败: ' + e.message); });
   }
 
   // 环境检测提示
@@ -2129,11 +2241,9 @@
   }
 
   // ── 全局设置面板 ──────────────────────
-  let cfgAPIKeyChanged = false;
   let cfgHasAPIKey = false;
 
   function openSettings() {
-    cfgAPIKeyChanged = false;
     $('settings-modal').hidden = false;
     api(API.configGet).then(function (c) {
       $('set-data-dir').value = c.data_dir || '';
@@ -2141,19 +2251,10 @@
       $('set-retention').value = c.log_retention_days || 30;
       $('set-hf').value = c.hf_endpoint || '';
       $('set-cache-dir').value = c.cache_dir || '';
-      cfgHasAPIKey = !!c.has_api_key;
-      $('set-api-key').value = '';
-      $('set-api-key').placeholder = cfgHasAPIKey ? '••••••••（已保存，输入新值可替换）' : '可选，AES-256 加密存储';
-      $('set-key-hint').textContent = cfgHasAPIKey ? '🔒 已保存加密 Key · 点 👁 查看明文（不点不会加载明文）' : '';
     }).catch(function (e) { alert('加载设置失败: ' + e.message); });
   }
 
   function saveSettings() {
-    const keyVal = $('set-api-key').value;
-    let serverApiKey = '__KEEP__';
-    if (cfgAPIKeyChanged && keyVal === '') serverApiKey = '';      // 用户清空 → 清除
-    else if (cfgAPIKeyChanged && keyVal !== '') serverApiKey = keyVal; // 新值 → 加密存储
-
     api(API.configPut, {
       method: 'PUT',
       body: JSON.stringify({
@@ -2161,7 +2262,7 @@
         log_retention_days: parseInt($('set-retention').value, 10) || 30,
         hf_endpoint: $('set-hf').value.trim(),
         cache_dir: $('set-cache-dir').value.trim(),
-        server_api_key: serverApiKey
+        server_api_key: '__KEEP__' // 全局 API Key 由「🔑 全局 API」板块管理，这里不覆盖
       })
     }).then(function () {
       $('settings-modal').hidden = true;
@@ -2169,10 +2270,204 @@
     }).catch(function (e) { alert('保存失败: ' + e.message); });
   }
 
-  function clearAPIKey() {
-    cfgAPIKeyChanged = true;
-    $('set-api-key').value = '';
-    $('set-key-hint').textContent = '🔓 保存后将清除已存 API Key';
+  // ── 🔑 全局 API Key 专属板块 ──────────
+  let akAPIKeyChanged = false;
+  let akTimer = null;
+
+  function openAPIKeyModal() {
+    $('apikey-modal').hidden = false;
+    loadAPIKeyState();
+    renderAPIKeyMonitor();
+    if (akTimer) clearInterval(akTimer);
+    akTimer = setInterval(akTick, 5000); // 实时刷新：系统资源 + 实例指标
+  }
+
+  function closeAPIKeyModal() {
+    $('apikey-modal').hidden = true;
+    if (akTimer) { clearInterval(akTimer); akTimer = null; }
+    MonChart.resetCharts();
+  }
+
+  // 加载 API Key 配置状态（已保存/未配置）
+  function loadAPIKeyState() {
+    api(API.configGet).then(function (c) {
+      cfgHasAPIKey = !!c.has_api_key;
+      akAPIKeyChanged = false;
+      $('ak-api-key').value = '';
+      $('ak-api-key').placeholder = cfgHasAPIKey ? '••••••••（已保存，输入新值可替换）' : '可选，AES-256 加密存储';
+      $('ak-key-hint').textContent = cfgHasAPIKey
+        ? '🔒 已保存加密 Key · 点 👁 查看明文（不点不会加载明文）'
+        : '未配置全局 Key。可手动粘贴，或点 🎲 生成一个 256 位随机 Key 后 💾 保存。';
+    }).catch(function () {
+      $('ak-key-hint').textContent = '⚠️ 读取配置失败';
+    });
+  }
+
+  // 显示/隐藏 API Key（已保存但未回显时点击拉取明文）
+  function akToggleVisibility() {
+    const input = $('ak-api-key');
+    const btn = $('ak-key-toggle');
+    if (input.type === 'password' && !input.value && cfgHasAPIKey) {
+      api(API.configKey).then(function (r) {
+        input.value = r.key || '';
+        input.type = 'text'; btn.textContent = '🙈';
+        $('ak-key-hint').textContent = '🔓 已回显明文（点击 💾 保存将重新加密存储）';
+      }).catch(function () { flashBtn(btn, '✗'); });
+      return;
+    }
+    if (input.type === 'password') { input.type = 'text'; btn.textContent = '🙈'; }
+    else { input.type = 'password'; btn.textContent = '👁'; }
+  }
+
+  // 保存全局 API Key（带上完整现有配置，避免其他字段被清空）
+  function saveAPIKey() {
+    const keyVal = $('ak-api-key').value;
+    let serverApiKey = '__KEEP__';
+    if (akAPIKeyChanged && keyVal === '') serverApiKey = '';        // 用户清空 → 清除
+    else if (akAPIKeyChanged && keyVal !== '') serverApiKey = keyVal; // 新值 → 加密存储
+    api(API.configGet).then(function (c) {
+      return api(API.configPut, {
+        method: 'PUT',
+        body: JSON.stringify({
+          binary_path: c.binary_path || '',
+          log_retention_days: c.log_retention_days || 30,
+          hf_endpoint: c.hf_endpoint || '',
+          cache_dir: c.cache_dir || '',
+          server_api_key: serverApiKey
+        })
+      });
+    }).then(function () {
+      flashBtn($('ak-key-save'), '✓ 已保存');
+      loadAPIKeyState();
+      autoFillGlobalKey(); // 主面板自动填入新的全局 Key
+    }).catch(function (e) { alert('保存失败: ' + e.message); });
+  }
+
+  // 系统资源（实时，来自 /api/system 每次实时探测）
+  function loadSysResource() {
+    api(API.system).then(function (r) {
+      renderSysResource(r.hardware || {});
+    }).catch(function () {
+      const el = $('ak-sys');
+      if (el) el.innerHTML = '<div class="empty-hint">系统资源接口不可用。</div>';
+    });
+  }
+
+  function renderSysResource(hw) {
+    const el = $('ak-sys');
+    if (!el) return;
+    const gpuNames = (hw.gpu_models || []).join(' / ') || '—';
+    const fmtGB = function (mb) { return typeof mb === 'number' ? (mb / 1024).toFixed(1) : '--'; };
+    const vramTotal = hw.total_vram_mb || 0, vramFree = hw.free_vram_mb || 0;
+    const vramUsed = vramTotal > 0 ? Math.max(0, vramTotal - vramFree) : 0;
+    const vramPct = vramTotal > 0 ? Math.round(vramUsed / vramTotal * 100) : 0;
+    const backend = hw.backend || 'cpu';
+    const badge = function (s) {
+      return s === 'cuda' ? '🚀 CUDA' : s === 'vulkan' ? '🎨 Vulkan' : s === 'metal' ? '🍎 Metal' : '💻 CPU';
+    };
+    let html = '<div class="ak-sys-grid">';
+    html += `<div class="ak-sys-card"><span class="ak-sys-label">🎮 GPU</span><span class="ak-sys-val">${esc(gpuNames)}</span></div>`;
+    html += `<div class="ak-sys-card"><span class="ak-sys-label">⚡ 后端</span><span class="ak-sys-val">${badge(backend)}${hw.cuda_major ? ' (CUDA ' + hw.cuda_major + ')' : ''}</span></div>`;
+    html += `<div class="ak-sys-card"><span class="ak-sys-label">🧠 CPU 核心</span><span class="ak-sys-val">${hw.cpu_cores || '--'}</span></div>`;
+    html += `<div class="ak-sys-card"><span class="ak-sys-label">💾 系统内存</span><span class="ak-sys-val">${fmtGB(hw.system_ram_mb)} GB</span></div>`;
+    html += '</div>';
+    if (vramTotal > 0) {
+      html += `<div class="ak-bar-row"><span class="ak-bar-label">🖥 GPU 显存</span>
+        <div class="ak-bar"><div class="ak-bar-fill" style="width:${vramPct}%"></div></div>
+        <span class="ak-bar-num">${fmtGB(vramUsed)} / ${fmtGB(vramTotal)} GB (${vramPct}%)</span></div>`;
+    }
+    el.innerHTML = html;
+  }
+
+  // 全局统计（汇总所有运行实例的 /metrics）
+  function renderGlobalStats(instances) {
+    const el = $('ak-stats');
+    if (!el) return;
+    let predTotal = 0, promptTotal = 0, reqCount = 0, maxRPS = 0;
+    instances.forEach(function (it) {
+      const m = it.metrics || {};
+      if (typeof m.n_predicted_tokens_total === 'number') predTotal += m.n_predicted_tokens_total;
+      if (typeof m.n_prompt_tokens_total === 'number') promptTotal += m.n_prompt_tokens_total;
+      if (it.requests && it.requests.length) reqCount += it.requests.length;
+      if (typeof m.predicted_per_second === 'number' && m.predicted_per_second > maxRPS) maxRPS = m.predicted_per_second;
+    });
+    const fmt = function (v) { return typeof v === 'number' ? v.toLocaleString() : '0'; };
+    el.innerHTML = `<div class="ak-stat"><span class="ak-stat-v">${fmt(predTotal)}</span><span class="ak-stat-l">累计输出 tok</span></div>
+      <div class="ak-stat"><span class="ak-stat-v">${fmt(promptTotal)}</span><span class="ak-stat-l">累计输入 tok</span></div>
+      <div class="ak-stat"><span class="ak-stat-v">${reqCount}</span><span class="ak-stat-l">实例请求</span></div>
+      <div class="ak-stat"><span class="ak-stat-v">${maxRPS.toFixed(1)}</span><span class="ak-stat-l">峰值输出 tok/s</span></div>
+      <div class="ak-stat"><span class="ak-stat-v">${instances.length}</span><span class="ak-stat-l">运行实例</span></div>`;
+  }
+
+  // 实例实时监控：首次/手动刷新时重建卡片（复用 Monitor 卡片）
+  function renderAPIKeyMonitor() {
+    const body = $('apikey-monitor');
+    if (!body) return;
+    api('/api/monitor').then(function (r) {
+      const data = r.instances || [];
+      renderGlobalStats(data);
+      MonChart.resetCharts();
+      if (!data.length) {
+        body.innerHTML = '<div class="empty-hint">暂无运行实例。启动模型后这里会实时显示输入/输出 token、速率、并发槽位与 KV 占用。</div>';
+        return;
+      }
+      let html = '';
+      data.forEach(function (it) { html += Monitor.card(it); });
+      body.innerHTML = html;
+      data.forEach(function (it) {
+        const visible = !!body.offsetParent;
+        const el = body.querySelector('.monitor-card[data-session="' + it.session_id + '"] .monitor-chart');
+        if (el && visible) MonChart.ensure(it.session_id, 'apikey-monitor', el);
+        MonChart.replay(it.session_id);
+        const m = (window.__liveMetrics || {})[it.session_id];
+        if (m) akUpdateCard(it.session_id, m);
+        if (it.requests && it.requests.length) akRenderRequests(it.session_id, it.requests);
+      });
+      body.querySelectorAll('.mon-big').forEach(function (btn) {
+        btn.addEventListener('click', function () { Monitor.openBig(btn.getAttribute('data-sid')); });
+      });
+    }).catch(function () {
+      body.innerHTML = '<div class="empty-hint">监控接口不可用。</div>';
+    });
+  }
+
+  // 更新单张实例卡片数字 + 趋势（不重建 DOM）
+  function akUpdateCard(sid, m) {
+    const card = document.querySelector('#apikey-monitor .monitor-card[data-session="' + sid + '"]');
+    if (!card) return;
+    const set = function (role, txt) {
+      const e = card.querySelector('[data-role="' + role + '"]');
+      if (e) e.textContent = txt;
+    };
+    if (typeof m.n_prompt_tokens_total === 'number') set('prompt', m.n_prompt_tokens_total.toLocaleString());
+    if (typeof m.n_predicted_tokens_total === 'number') set('pred', m.n_predicted_tokens_total.toLocaleString());
+    if (typeof m.prompt_per_second === 'number' && isFinite(m.prompt_per_second)) set('pps', m.prompt_per_second.toFixed(1));
+    if (typeof m.predicted_per_second === 'number' && isFinite(m.predicted_per_second)) set('rps', m.predicted_per_second.toFixed(1));
+    if (typeof m.slots_processing === 'number') set('slots', m.slots_processing.toLocaleString());
+    if (typeof m.kv_cache_usage_ratio === 'number') set('kv', (m.kv_cache_usage_ratio * 100).toFixed(0) + '%');
+    MonChart.push(sid, m);
+  }
+
+  function akRenderRequests(sid, list) {
+    const box = document.querySelector('#apikey-monitor .req-history[data-sid="' + sid + '"]');
+    if (box) box.innerHTML = list.slice(0, 10).map(reqRow).join('');
+  }
+
+  // 5 秒定时刷新：系统资源 + 全局统计 + 卡片数字（不重建图表）
+  function akTick() {
+    loadSysResource();
+    api('/api/monitor').then(function (r) {
+      const data = r.instances || [];
+      renderGlobalStats(data);
+      // 数据已就绪但卡片区还是空（初次打开时 /api/monitor 可能尚未就绪）→ 重建卡片
+      const body = $('apikey-monitor');
+      const needRebuild = body && data.length && !body.querySelector('.monitor-card');
+      if (needRebuild) { renderAPIKeyMonitor(); return; }
+      data.forEach(function (it) {
+        const m = (window.__liveMetrics || {})[it.session_id] || it.metrics;
+        if (m) akUpdateCard(it.session_id, m);
+      });
+    }).catch(function () { /* 保持上次数据 */ });
   }
 
   // ── 文件/目录浏览器 ───────────────────
@@ -2302,6 +2597,25 @@
       div.innerHTML = `<input type="checkbox" class="tm" data-id="${esc(b.id)}" checked><span title="${esc(b.base_model && b.base_model.path || '')}">${esc(b.name)}</span>`;
       box.appendChild(div);
     });
+    updateTestModelCount();
+  }
+
+  // 一键全选 / 一键取消选择
+  function selectAllTestModels() {
+    document.querySelectorAll('#test-models .tm').forEach(function (c) { c.checked = true; });
+    updateTestModelCount();
+  }
+
+  function clearTestModels() {
+    document.querySelectorAll('#test-models .tm').forEach(function (c) { c.checked = false; });
+    updateTestModelCount();
+  }
+
+  function updateTestModelCount() {
+    const total = document.querySelectorAll('#test-models .tm').length;
+    const sel = document.querySelectorAll('#test-models .tm:checked').length;
+    const el = $('test-model-count');
+    if (el) el.textContent = `已选 ${sel}/${total} 个模型`;
   }
 
   function startTest() {
@@ -2401,63 +2715,65 @@
   // ── 参数扫描（单模型 × 多参数组合）────────────────
   const SWEEP_PARAMS = [
     { key: 'n_gpu_layers', label: 'GPU 层数', type: 'int', hint: '0=纯CPU；总层数=全部上GPU', def: '0, 16, 33', ph: '如 0, 16, 33',
-      presets: [['0,16,33', '小→中→全量'], ['0,33', '纯CPU vs 全量'], ['16,32,33', '逐档上量'], ['0', '仅纯CPU'], ['33', '仅全量上GPU']] },
+      presets: [['-1,0,8,16,24,32,33,40,99', '全覆盖'], ['0,16,33', '小→中→全量'], ['0,33', '纯CPU vs 全量'], ['16,32,33', '逐档上量'], ['0', '仅纯CPU'], ['33', '仅全量上GPU']] },
     { key: 'ctx_size', label: '上下文长度', type: 'int', hint: '越大越慢、越占显存', def: '', ph: '如 512,1024,2048 或更大',
-      presets: [['512,1024,2048', '短/中/长'], ['1024,2048,4096', '标准三档'], ['2048,4096,8192', '偏长'], ['4096,8192,16384', '大上下文'], ['8192,16384,32768', '超大'], ['16384,32768,65536', '极限'], ['32768', '固定32K'], ['65536', '固定64K'], ['131072', '固定128K']] },
+      presets: [['512,1024,2048,4096,8192,16384,32768,65536,131072', '全覆盖'], ['512,1024,2048', '短/中/长'], ['1024,2048,4096', '标准三档'], ['2048,4096,8192', '偏长'], ['4096,8192,16384', '大上下文'], ['8192,16384,32768', '超大'], ['16384,32768,65536', '极限'], ['32768', '固定32K'], ['65536', '固定64K'], ['131072', '固定128K']] },
     { key: 'threads', label: '线程数', type: 'int', hint: '0=自动', def: '', ph: '如 0, 8, 16',
-      presets: [['0,8,16', '自动/中/高'], ['4,8,12,16', '逐档'], ['0', '固定自动'], ['8', '固定8'], ['16', '固定16'], ['32', '固定32']] },
+      presets: [['0,4,8,12,16,24,32', '全覆盖'], ['0,8,16', '自动/中/高'], ['4,8,12,16', '逐档'], ['0', '固定自动'], ['8', '固定8'], ['16', '固定16'], ['32', '固定32']] },
     { key: 'batch_size', label: '批大小', type: 'int', hint: '影响预填充速度', def: '', ph: '如 128, 256, 512',
-      presets: [['128,256,512', '小/中/大'], ['256,512,1024', '中/大/超大'], ['512,1024,2048', '标准三档'], ['1024,2048,4096', '大三档'], ['2048,4096,8192', '极限'], ['512', '固定512'], ['2048', '固定2048']] },
+      presets: [['128,256,512,1024,2048,4096,8192', '全覆盖'], ['128,256,512', '小/中/大'], ['256,512,1024', '中/大/超大'], ['512,1024,2048', '标准三档'], ['1024,2048,4096', '大三档'], ['2048,4096,8192', '极限'], ['512', '固定512'], ['2048', '固定2048']] },
     { key: 'ubatch_size', label: '微批大小', type: 'int', hint: '预填充实际执行批次', def: '', ph: '如 64, 128, 256',
-      presets: [['64,128,256', '小/中/大'], ['128,256', '两档'], ['256,512', '中/大'], ['512', '固定512']] },
+      presets: [['64,128,256,512,1024', '全覆盖'], ['64,128,256', '小/中/大'], ['128,256', '两档'], ['256,512', '中/大'], ['512', '固定512']] },
     { key: 'cache_type_k', label: 'K 缓存类型', type: 'enum', hint: '量化缓存省显存（需 Flash 注意力）', def: '', ph: '如 f16, q8_0',
-      presets: [['f16,q8_0', 'f16 vs 量化'], ['f16,q8_0,q4_0', '三档'], ['q8_0', '固定q8_0'], ['f16', '固定f16'], ['q4_0', '固定q4_0']] },
+      presets: [['f32,f16,bf16,q8_0,q4_0,iq4_nl,q5_0,q5_1', '全覆盖'], ['f16,q8_0', 'f16 vs 量化'], ['f16,q8_0,q4_0', '三档'], ['q8_0', '固定q8_0'], ['f16', '固定f16'], ['q4_0', '固定q4_0']] },
     { key: 'cache_type_v', label: 'V 缓存类型', type: 'enum', hint: '同 K 缓存', def: '', ph: '如 f16, q8_0',
-      presets: [['f16,q8_0', 'f16 vs 量化'], ['f16,q8_0,q4_0', '三档'], ['q8_0', '固定q8_0'], ['f16', '固定f16'], ['q4_0', '固定q4_0']] },
+      presets: [['f32,f16,bf16,q8_0,q4_0,iq4_nl,q5_0,q5_1', '全覆盖'], ['f16,q8_0', 'f16 vs 量化'], ['f16,q8_0,q4_0', '三档'], ['q8_0', '固定q8_0'], ['f16', '固定f16'], ['q4_0', '固定q4_0']] },
     { key: 'flash_attn', label: 'Flash 注意力', type: 'enum', hint: '量化 KV 需开 FA', def: '', ph: 'on / off',
-      presets: [['on,off', '开 vs 关'], ['on', '固定开'], ['off', '固定关']] },
+      presets: [['on,off,auto', '全覆盖'], ['on,off', '开 vs 关'], ['on', '固定开'], ['off', '固定关']] },
     { key: 'rope_scaling', label: 'RoPE 缩放', type: 'enum', hint: '留空=不设置', def: '', ph: 'linear / yarn',
-      presets: [['linear', 'linear 线性'], ['yarn', 'yarn 长上下文'], ['none,linear,yarn', '全部对比'], ['none', '固定不缩放']] },
+      presets: [['none,linear,yarn', '全覆盖'], ['linear', 'linear 线性'], ['yarn', 'yarn 长上下文'], ['none,linear,yarn', '全部对比'], ['none', '固定不缩放']] },
     { key: 'load_mode', label: '加载模式', type: 'enum', hint: 'mmap 默认快', def: '', ph: 'mmap / mlock',
-      presets: [['mmap,mlock', '映射 vs 锁定'], ['mmap', '固定mmap'], ['mlock', '固定mlock']] },
+      presets: [['mmap,mlock,mmap+mlock,none,dio', '全覆盖'], ['mmap,mlock', '映射 vs 锁定'], ['mmap', '固定mmap'], ['mlock', '固定mlock']] },
     { key: 'numa', label: 'NUMA', type: 'enum', hint: '多路CPU有效；留空=自动', def: '', ph: 'distribute / isolate',
       presets: [['distribute,isolate', '两种策略'], ['distribute', 'distribute'], ['isolate', 'isolate']] },
     { key: 'kv_unified', label: '统一 KV 缓冲', type: 'bool', hint: 'KV 合并为统一缓冲', def: '', ph: 'on / off',
       presets: [['on,off', '开 vs 关'], ['on', '开启'], ['off', '关闭']] },
     { key: 'cache_ram', label: '提示缓存内存(MiB)', type: 'int', hint: '0=禁用', def: '', ph: '如 0, 8192',
-      presets: [['0,8192', '禁用 vs 默认'], ['0,4096,8192', '三档'], ['4096,8192,16384', '偏大三档'], ['8192', '固定8192'], ['0', '固定禁用']] },
+      presets: [['0,2048,4096,8192,16384,32768', '全覆盖'], ['0,8192', '禁用 vs 默认'], ['0,4096,8192', '三档'], ['4096,8192,16384', '偏大三档'], ['8192', '固定8192'], ['0', '固定禁用']] },
     { key: 'ctx_checkpoints', label: '上下文检查点', type: 'int', hint: '检查点数量', def: '', ph: '如 16, 32, 64',
-      presets: [['16,32,64', '三档'], ['32', '固定32'], ['0,32', '禁用 vs 默认'], ['0', '固定禁用']] },
+      presets: [['0,8,16,32,64', '全覆盖'], ['16,32,64', '三档'], ['32', '固定32'], ['0,32', '禁用 vs 默认'], ['0', '固定禁用']] },
     { key: 'checkpoint_min_step', label: '检查点最小间隔', type: 'int', hint: '间隔越大越省', def: '', ph: '如 4096, 8192',
-      presets: [['4096,8192,16384', '三档'], ['2048,4096,8192', '更密三档'], ['8192', '固定8192']] },
+      presets: [['2048,4096,8192,16384', '全覆盖'], ['4096,8192,16384', '三档'], ['2048,4096,8192', '更密三档'], ['8192', '固定8192']] },
     { key: 'cpu_moe', label: 'MoE 专家驻留 CPU', type: 'bool', hint: 'MoE 专家留在 CPU', def: '', ph: 'on / off',
       presets: [['on,off', '开 vs 关'], ['on', '开启'], ['off', '关闭']] },
     { key: 'parallel', label: '并行槽位', type: 'int', hint: '并发请求槽位数', def: '', ph: '如 1, 4, 8',
-      presets: [['1,4,8', '低/中/高'], ['4,8', '两档'], ['1', '固定单槽'], ['4', '固定4']] },
+      presets: [['1,2,4,8', '全覆盖'], ['1,4,8', '低/中/高'], ['4,8', '两档'], ['1', '固定单槽'], ['4', '固定4']] },
     { key: 'main_gpu', label: '主 GPU', type: 'int', hint: '主 GPU 编号（多卡）', def: '', ph: '如 0, 1',
-      presets: [['0,1', '两卡对比'], ['0', '固定0'], ['1', '固定1']] },
+      presets: [['0,1,2,3', '全覆盖'], ['0,1', '两卡对比'], ['0', '固定0'], ['1', '固定1']] },
     { key: 'split_mode', label: '张量拆分', type: 'enum', hint: '多卡拆分方式', def: '', ph: 'layer / row',
       presets: [['layer,row', '两种'], ['layer', '按层'], ['row', '按行']] },
     { key: 'tensor_split', label: '张量分配', type: 'string', hint: '各卡权重比例', def: '', ph: '如 0.5,0.5',
       presets: [['0.5,0.5', '双卡均分'], ['0.7,0.3', '偏重']] },
     { key: 'rope_scale', label: 'RoPE 缩放因子', type: 'float', hint: '上下文外推倍数', def: '', ph: '如 2, 4',
-      presets: [['2,4', '两档'], ['2', '2倍'], ['4', '4倍']] },
+      presets: [['1,2,4,8', '全覆盖'], ['2,4', '两档'], ['2', '2倍'], ['4', '4倍']] },
     { key: 'kv_offload', label: 'KV 卸载 GPU', type: 'bool', hint: 'KV 缓存放 GPU', def: '', ph: 'on / off',
       presets: [['on,off', '开 vs 关'], ['on', '开启'], ['off', '关闭']] },
     { key: 'keep', label: '保留初始 token', type: 'int', hint: '长上下文复用', def: '', ph: '如 0, 48',
-      presets: [['0,48', '两种'], ['0', '不保留'], ['48', '保留48']] },
+      presets: [['0,16,32,48,64', '全覆盖'], ['0,48', '两种'], ['0', '不保留'], ['48', '保留48']] },
     { key: 'cache_reuse', label: 'KV 复用最小块', type: 'int', hint: '块大小', def: '', ph: '如 256, 512',
-      presets: [['256,512', '两档'], ['0', '禁用'], ['512', '512']] },
+      presets: [['0,256,512,1024', '全覆盖'], ['256,512', '两档'], ['0', '禁用'], ['512', '512']] },
     { key: 'cache_idle_slots', label: '缓存空闲槽位', type: 'bool', hint: '空闲槽位复用', def: '', ph: 'on / off',
       presets: [['on,off', '开 vs 关'], ['on', '开启'], ['off', '关闭']] },
     { key: 'context_shift', label: '上下文移位', type: 'bool', hint: '长对话移位', def: '', ph: 'on / off',
       presets: [['on,off', '开 vs 关'], ['on', '开启'], ['off', '关闭']] },
     { key: 'threads_batch', label: '批处理线程', type: 'int', hint: '预填充线程', def: '', ph: '如 0, 8, 16',
-      presets: [['0,8,16', '三档'], ['0', '跟随'], ['8', '固定8']] },
+      presets: [['0,4,8,16,32', '全覆盖'], ['0,8,16', '三档'], ['0', '跟随'], ['8', '固定8']] },
     { key: 'n_cpu_moe', label: 'CPU 专家数', type: 'int', hint: 'MoE 留 CPU 层数', def: '', ph: '如 0, 4, 8',
-      presets: [['0,4,8', '三档'], ['0', '不用'], ['8', '固定8']] },
+      presets: [['0,4,8,16', '全覆盖'], ['0,4,8', '三档'], ['0', '不用'], ['8', '固定8']] },
     { key: 'no_mmproj_offload', label: 'mmproj 走 CPU', type: 'bool', hint: '省显存给主模型', def: '', ph: 'on / off',
       presets: [['on,off', '开 vs 关'], ['on', '开启'], ['off', '关闭']] },
+    { key: 'mmproj_device', label: 'mmproj 设备', type: 'string', hint: '投影器设备（v0.2.0 新增）', def: '', ph: 'auto / 0 / none',
+      presets: [['auto', '自动'], ['0', 'GPU 0'], ['none', '不卸载']] },
     { key: 'reasoning_effort', label: '推理努力', type: 'enum', hint: '推理模型思考强度', def: '', ph: 'low / medium / high',
       presets: [['low,medium,high', '三档'], ['medium,high', '两档'], ['low', '低'], ['high', '高']] },
     { key: 'sampler_seq', label: '简化采样序列', type: 'string', hint: '单字符采样链', def: '', ph: '如 edskypmxt',
@@ -2520,21 +2836,31 @@
   }
 
   function sweepRowHTML(p) {
-    const opts = (p.presets || []).map(function (pr) {
-      return '<option value="' + esc(pr[0]) + '">' + esc(pr[1]) + '</option>';
+    // 预设下拉：把组合档位拆成单个数值选项（不要“1档2档”描述、不要组合串），
+    // 选项即数值本身，选择后追加到输入框（可多次选择累积）
+    const singles = [];
+    (p.presets || []).forEach(function (pr) {
+      String(pr[0]).split(',').forEach(function (s) {
+        s = s.trim();
+        if (s && singles.indexOf(s) < 0) singles.push(s);
+      });
+    });
+    const opts = singles.map(function (s) {
+      return '<option value="' + esc(s) + '">' + esc(s) + '</option>';
     }).join('');
     const numeric = p.type === 'int' || p.type === 'float';
     const chips = (p.presets || []).map(function (pr) {
-      return '<button class="btn tiny me-chip" data-key="' + p.key + '" data-val="' + esc(pr[0]) + '" title="填入: ' + esc(pr[0]) + '">' + esc(pr[1]) + '</button>';
+      const tip = esc(pr[1] || pr[0]);
+      return '<button class="btn tiny me-chip" data-key="' + p.key + '" data-val="' + esc(pr[0]) + '" title="' + tip + ' → ' + esc(pr[0]) + '">' + esc(pr[0]) + '</button>';
     }).join('');
     return '<span class="sweep-label">' + esc(p.label) + '<i class="sweep-hint">' + esc(p.hint) + '</i></span>' +
       '<span class="sweep-mode" title=""></span>' +
       '<span class="sweep-cap" data-cap="' + p.key + '"></span>' +
       '<input type="text" id="sw-' + p.key + '" data-key="' + p.key + '" value="' + esc(p.def || '') + '" placeholder="' + esc(p.ph || '逗号分隔多个值（多值=扫描，单值=固定）') + '">' +
-      '<button class="btn tiny" data-editor="' + p.key + '" title="多值编辑器：范围生成 / 档位选择">📐</button>' +
+      '<button class="btn tiny" data-editor="' + p.key + '" title="折叠 / 展开范围生成与档位">📐</button>' +
       '<select class="preset" data-target="sw-' + p.key + '" title="一键填入常用值"><option value="">▾ 预设</option>' + opts + '</select>' +
       '<button class="btn tiny" data-clear="' + p.key + '" title="清空此项">✕</button>' +
-      '<div class="multi-editor" id="me-' + p.key + '" hidden>' +
+      '<div class="multi-editor" id="me-' + p.key + '">' +
       (numeric
         ? '<div class="me-range"><span>范围</span>' +
           '<input type="number" class="me-min" data-me="' + p.key + '" placeholder="min" title="最小值">' +
@@ -2558,9 +2884,15 @@
     const presetSel = row.querySelector('.preset[data-target]');
     if (presetSel) presetSel.addEventListener('change', function () {
       const target = $(presetSel.dataset.target);
-      if (!target || presetSel.value === '') return;
-      target.value = presetSel.value;
+      const val = presetSel.value;
       presetSel.value = '';
+      if (!target || val === '') return;
+      // 追加去重式：选单个数值就加到输入框，重复值不重复加
+      const cur = target.value.trim();
+      const parts = cur ? cur.split(',').map(function (s) { return s.trim(); }).filter(Boolean) : [];
+      if (parts.indexOf(val) >= 0) return;
+      parts.push(val);
+      target.value = parts.join(',');
       updateSweepEstimate();
     });
     // 多值编辑器：📐 展开/收起
@@ -2591,14 +2923,23 @@
         flashBtn(gen, '✓ ' + vals.length + ' 档');
       }
     });
-    // 预设 chips：点击填入
+    // 预设 chips：追加去重式填入（点一次加一组，重复的值不重复加，
+    // 可连续点多个档位累积多组值到同一输入框，无需手动输逗号）
     row.querySelectorAll('.me-chip').forEach(function (chip) {
       chip.addEventListener('click', function () {
         const target = $('sw-' + chip.dataset.key);
-        if (target) {
-          target.value = chip.dataset.val;
-          updateSweepEstimate();
-        }
+        if (!target) return;
+        const addVals = String(chip.dataset.val).split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+        const cur = target.value.trim();
+        const parts = cur ? cur.split(',').map(function (s) { return s.trim(); }).filter(Boolean) : [];
+        let added = 0;
+        addVals.forEach(function (v) {
+          if (parts.indexOf(v) < 0) { parts.push(v); added++; }
+        });
+        if (!added) { flashBtn(chip, '已含'); return; }
+        target.value = parts.join(',');
+        flashBtn(chip, '✓ +' + added);
+        updateSweepEstimate();
       });
     });
   }
@@ -2661,7 +3002,7 @@
     const key = sel.value;
     if (!key) return;
     sel.value = '';
-    if (document.getElementById('sw-' + key)) { flashBtn(sel, '已添加'); return; }
+    if (document.getElementById('sw-' + key)) { flashSelect(sel); return; }
     const pd = (window.__sweepParams || []).find(function (x) { return x.key === key; });
     if (!pd) return;
     const type = sweepKindToType(pd.kind);
@@ -2672,7 +3013,7 @@
     });
     const opt = Array.prototype.find.call(sel.options, function (o) { return o.value === key; });
     if (opt) opt.remove();
-    flashBtn(sel, '✓ 已添加');
+    flashSelect(sel);
   }
 
   function fmtDur(secs) {

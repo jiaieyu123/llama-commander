@@ -8,6 +8,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -41,6 +42,7 @@ import (
 	"llama-launcher/internal/mcp"
 	"llama-launcher/internal/secure"
 	"llama-launcher/internal/session"
+	"llama-launcher/internal/websearch"
 	"llama-launcher/internal/webui"
 )
 
@@ -119,7 +121,12 @@ type App struct {
 	testPortMu  sync.Mutex                // 测试端口分配互斥（显存感知并行用）
 	testPorts   map[int]bool              // 测试已分配端口（并行时避免冲突）
 	testCache   map[string]testCacheEntry // L2 磁盘缓存（历史测过的组合，data/test_cache.json）
+	logTail     map[string][]string       // 会话 → 最近 N 行 llama-server 日志（失败诊断用）
 }
+
+// maxLogTailLines keeps only the most recent lines per session so a failed
+// load/test can surface the real llama-server error instead of a generic one.
+const maxLogTailLines = 60
 
 // activeRun couples a session with its live process.
 type activeRun struct {
@@ -253,6 +260,7 @@ func NewApp(cfg *GlobalConfig) (*App, error) {
 		testOOM:       make(map[string]bool),
 		testPorts:     map[int]bool{},
 		testCache:     map[string]testCacheEntry{},
+		logTail:       make(map[string][]string),
 		configPath:    filepath.Join(cfg.DataDir, "config.json"),
 		secretKeyPath: filepath.Join(cfg.DataDir, ".secret"),
 	}
@@ -363,11 +371,39 @@ func (a *App) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleSystem(w http.ResponseWriter, r *http.Request) {
+	hw := a.hw
+	// 实时刷新系统资源：启动时只探测一次，这里每次请求都重新探测
+	// （nvidia-smi 显存/内存是动态值），失败则回退到启动时的缓存。
+	if live, err := config.DetectHardware(r.Context()); err == nil && live != nil {
+		if live.GPUCount > 0 || a.hw == nil || a.hw.GPUCount == 0 {
+			hw = live
+		} else {
+			// 保留启动时已知的静态信息，仅更新动态值（空闲显存/系统内存）
+			cp := *a.hw
+			if live.FreeVRAMMB > 0 {
+				cp.FreeVRAMMB = live.FreeVRAMMB
+			}
+			if live.SystemRAMMB > 0 {
+				cp.SystemRAMMB = live.SystemRAMMB
+			}
+			hw = &cp
+		}
+	}
 	a.writeJSON(w, http.StatusOK, map[string]any{
-		"hardware": a.hw,
-		"binary":   a.cfg.BinaryPath,
-		"data_dir": a.cfg.DataDir,
+		"hardware":      hw,
+		"binary":        a.cfg.BinaryPath,
+		"data_dir":      a.cfg.DataDir,
+		"launcher_path": launcherExecutable(),
 	})
+}
+
+// launcherExecutable returns the absolute path of the running llama-launcher
+// executable (used by the built-in websearch-mcp MCP server template).
+func launcherExecutable() string {
+	if p, err := os.Executable(); err == nil {
+		return p
+	}
+	return ""
 }
 
 // RequestRecord is a single inference request parsed from llama-server's
@@ -401,6 +437,16 @@ var (
 // records for the monitor's request history.
 func (a *App) handleServerLine(sid, line string) {
 	a.hub.PublishLog(sid, "INFO", line)
+	// 保留最近日志尾部，供测试/加载失败时诊断真实原因（OOM、文件缺失、非法参数等）。
+	a.mu.Lock()
+	tail := a.logTail[sid]
+	if len(tail) >= maxLogTailLines {
+		tail = append(tail[maxLogTailLines-1:], line)
+	} else {
+		tail = append(tail, line)
+	}
+	a.logTail[sid] = tail
+	a.mu.Unlock()
 	// OOM 熔断：检测 CUDA 显存不足日志，立即标记该会话（测试引擎据此中止并清理）
 	low := strings.ToLower(line)
 	if strings.Contains(low, "out of memory") || strings.Contains(low, "cudamalloc") || strings.Contains(low, "cuda error") {
@@ -442,6 +488,25 @@ func (a *App) testOOMHit(sid string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.testOOM[sid]
+}
+
+// sessionLogTail returns the last few llama-server log lines for a session,
+// trimmed of ANSI codes, so a failed load/test can report the real cause.
+func (a *App) sessionLogTail(sid string, n int) []string {
+	a.mu.Lock()
+	tail := a.logTail[sid]
+	a.mu.Unlock()
+	if n <= 0 || n > len(tail) {
+		n = len(tail)
+	}
+	out := make([]string, 0, n)
+	for _, l := range tail[len(tail)-n:] {
+		clean := reAnsi.ReplaceAllString(l, "")
+		if strings.TrimSpace(clean) != "" {
+			out = append(out, clean)
+		}
+	}
+	return out
 }
 
 func (a *App) reqRec(sid string) *RequestRecord {
@@ -718,6 +783,15 @@ func (a *App) handleImport(w http.ResponseWriter, r *http.Request) {
 	var req importRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	// 防重复：同一模型路径已在库中则拒绝再次导入（扫描/手动添加都会走这里）。
+	if dup, ok := a.bundles.FindByPath(req.Path); ok {
+		a.writeJSON(w, http.StatusConflict, map[string]string{
+			"error":     "该模型已在模型库中（" + dup.Name + "），无需重复导入",
+			"bundle_id": dup.ID,
+			"name":      dup.Name,
+		})
 		return
 	}
 	b, err := a.bundles.AddFromGGUF(req.Path, req.Name, true)
@@ -1282,7 +1356,10 @@ func (a *App) handleMCPCheckEnv(w http.ResponseWriter, r *http.Request) {
 	a.writeJSON(w, http.StatusOK, result)
 }
 
-// handleMCPTest spawns a command briefly to verify it can start, then kills it.
+// handleMCPTest performs a REAL MCP stdio handshake (initialize + tools/list)
+// instead of just spawning the command, so a green test means the server's
+// tools can actually be listed. Failure includes the concrete reason (package
+// missing, missing env, server crash) plus the last stderr lines.
 func (a *App) handleMCPTest(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Command string            `json:"command"`
@@ -1293,20 +1370,248 @@ func (a *App) handleMCPTest(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": err.Error()})
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	res := mcpStdioProbe(req.Command, req.Args, req.Env, 60*time.Second)
+	a.writeJSON(w, http.StatusOK, res)
+}
+
+// mcpProbeResult is the JSON shape returned by the MCP handshake probe.
+type mcpProbeResult struct {
+	OK      bool     `json:"ok"`
+	Tools   []string `json:"tools,omitempty"`
+	Count   int      `json:"count"`
+	Message string   `json:"message"`
+}
+
+// mcpStdioProbe starts an MCP server over stdio and runs the JSON-RPC
+// initialize → tools/list handshake. A non-nil error tells the user exactly why
+// the server is unusable (missing package / missing env / crash), which the old
+// spawn-and-kill test could not detect.
+func mcpStdioProbe(command string, args []string, env map[string]string, timeout time.Duration) mcpProbeResult {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, req.Command, req.Args...)
+	cmd := exec.CommandContext(ctx, command, args...)
 	cmd.Env = os.Environ()
-	for k, v := range req.Env {
+	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
-	if err := cmd.Start(); err != nil {
-		a.writeJSON(w, http.StatusOK, map[string]any{"ok": false, "message": err.Error()})
-		return
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return mcpProbeResult{OK: false, Message: "无法建立 stdin 管道: " + err.Error()}
 	}
-	_ = cmd.Process.Kill()
-	_ = cmd.Wait()
-	a.writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "命令可执行，环境正常"})
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return mcpProbeResult{OK: false, Message: "无法建立 stdout 管道: " + err.Error()}
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return mcpProbeResult{OK: false, Message: "无法建立 stderr 管道: " + err.Error()}
+	}
+	if err := cmd.Start(); err != nil {
+		low := strings.ToLower(err.Error())
+		if strings.Contains(low, "executable file not found") || strings.Contains(low, "cannot find") || strings.Contains(low, "not recognized") {
+			return mcpProbeResult{OK: false, Message: "命令无法启动（未安装或不在 PATH）：" + err.Error()}
+		}
+		return mcpProbeResult{OK: false, Message: "命令启动失败: " + err.Error()}
+	}
+	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait(); _ = stdin.Close() }()
+
+	// 收集 stderr 尾部，失败时给出具体原因（npx 404、缺 env、崩溃等）
+	var tailMu sync.Mutex
+	var tailLines []string
+	go func() {
+		sc := bufio.NewScanner(stderr)
+		sc.Buffer(make([]byte, 0, 64*1024), 512*1024)
+		for sc.Scan() {
+			l := strings.TrimSpace(sc.Text())
+			if l == "" {
+				continue
+			}
+			tailMu.Lock()
+			tailLines = append(tailLines, l)
+			if len(tailLines) > 20 {
+				tailLines = tailLines[len(tailLines)-20:]
+			}
+			tailMu.Unlock()
+		}
+	}()
+	tail := func() string {
+		tailMu.Lock()
+		defer tailMu.Unlock()
+		if len(tailLines) == 0 {
+			return ""
+		}
+		n := len(tailLines)
+		if n > 5 {
+			tailLines = tailLines[n-5:]
+		}
+		return strings.Join(tailLines, " | ")
+	}
+
+	// 写请求：优先新版 newline-delimited JSON（2025-06-18+ spec）；若 server 不响应
+	// 再回退到旧版 Content-Length 帧（如已废弃的 brave-search 0.6.2）。
+	writeMsg := func(id int, method string, params map[string]any, newline bool) error {
+		msg := map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params}
+		body, _ := json.Marshal(msg)
+		var err error
+		if newline {
+			_, err = stdin.Write(append(body, '\n'))
+		} else {
+			if _, err = stdin.Write([]byte(fmt.Sprintf("Content-Length: %d\r\n\r\n", len(body)))); err == nil {
+				_, err = stdin.Write(body)
+			}
+		}
+		return err
+	}
+
+	// 单一 reader goroutine 串行读取所有消息；自动识别两种 stdio 格式：
+	// 以 '{' 开头 = newline-delimited JSON；否则为 Content-Length 帧（LSP 风格）。
+	br := bufio.NewReader(stdout)
+	type frameMsg struct {
+		msg map[string]any
+		err error
+	}
+	frameCh := make(chan frameMsg, 16)
+	go func() {
+		defer close(frameCh)
+		for {
+			first, err := br.Peek(1)
+			if err != nil {
+				frameCh <- frameMsg{nil, fmt.Errorf("读取响应失败: %v", err)}
+				return
+			}
+			if first[0] == '{' {
+				// 新版：newline-delimited JSON
+				line, err := br.ReadString('\n')
+				if err != nil {
+					frameCh <- frameMsg{nil, fmt.Errorf("读取响应行失败: %v", err)}
+					return
+				}
+				var msg map[string]any
+				if err := json.Unmarshal([]byte(strings.TrimSpace(line)), &msg); err != nil {
+					continue // 非 JSON 行（日志）跳过
+				}
+				frameCh <- frameMsg{msg, nil}
+				continue
+			}
+			// 旧版：Content-Length 帧
+			length := -1
+			for {
+				line, err := br.ReadString('\n')
+				if err != nil {
+					frameCh <- frameMsg{nil, fmt.Errorf("读取响应头失败: %v", err)}
+					return
+				}
+				line = strings.TrimSpace(line)
+				if line == "" {
+					break
+				}
+				if strings.HasPrefix(strings.ToLower(line), "content-length:") {
+					length, _ = strconv.Atoi(strings.TrimSpace(line[len("content-length:"):]))
+				}
+			}
+			if length < 0 {
+				frameCh <- frameMsg{nil, fmt.Errorf("响应缺少 Content-Length")}
+				return
+			}
+			body := make([]byte, length)
+			if _, err := io.ReadFull(br, body); err != nil {
+				frameCh <- frameMsg{nil, fmt.Errorf("读取响应体失败: %v", err)}
+				return
+			}
+			var msg map[string]any
+			if err := json.Unmarshal(body, &msg); err != nil {
+				continue
+			}
+			frameCh <- frameMsg{msg, nil}
+		}
+	}()
+	// 等待指定 id 的响应（跳过通知与其它 id），支持独立超时（用于协议回退）。
+	readResp := func(id int, timeout time.Duration) (map[string]any, error) {
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		for {
+			select {
+			case fm, ok := <-frameCh:
+				if !ok {
+					return nil, fmt.Errorf("服务已退出，未收到响应")
+				}
+				if fm.err != nil {
+					return nil, fm.err
+				}
+				if fm.msg["id"] == nil {
+					continue
+				}
+				if f, ok := fm.msg["id"].(float64); ok && int(f) == id {
+					return fm.msg, nil
+				}
+			case <-timer.C:
+				return nil, fmt.Errorf("等待响应超时（%v）", timeout)
+			}
+		}
+	}
+	// 先发一版请求，若超时则用另一种协议重试（newline 优先，Content-Length 回退）。
+	tryHandshake := func(id int, method string, params map[string]any) (map[string]any, error) {
+		for _, newline := range []bool{true, false} {
+			if err := writeMsg(id, method, params, newline); err != nil {
+				return nil, fmt.Errorf("发送 %s 失败: %v", method, err)
+			}
+			if resp, err := readResp(id, 12*time.Second); err == nil {
+				return resp, nil
+			}
+		}
+		return nil, fmt.Errorf("尝试两种 stdio 协议（newline/Content-Length）均未收到 %s 响应", method)
+	}
+
+	// 1) initialize
+	resp, err := tryHandshake(1, "initialize", map[string]any{
+		"protocolVersion": "2025-06-18",
+		"capabilities":    map[string]any{},
+		"clientInfo":      map[string]any{"name": "llama-launcher", "version": "0.2.0"},
+	})
+	if err != nil {
+		return mcpProbeResult{OK: false, Message: err.Error() + "；命令可执行但 MCP 握手未完成（可能包不完整或环境变量缺失）" + (func() string {
+			if t := tail(); t != "" {
+				return "。服务输出: " + t
+			}
+			return ""
+		})()}
+	}
+	if e, ok := resp["error"].(map[string]any); ok {
+		return mcpProbeResult{OK: false, Message: "initialize 报错: " + fmt.Sprint(e["message"])}
+	}
+
+	// 2) tools/list
+	resp2, err := tryHandshake(2, "tools/list", map[string]any{})
+	if err != nil {
+		return mcpProbeResult{OK: false, Message: err.Error() + (func() string {
+			if t := tail(); t != "" {
+				return "。服务输出: " + t
+			}
+			return ""
+		})()}
+	}
+	if e, ok := resp2["error"].(map[string]any); ok {
+		return mcpProbeResult{OK: false, Message: "tools/list 报错: " + fmt.Sprint(e["message"]) + (func() string {
+			if t := tail(); t != "" {
+				return "。服务输出: " + t
+			}
+			return ""
+		})()}
+	}
+	result, _ := resp2["result"].(map[string]any)
+	rawTools, _ := result["tools"].([]any)
+	tools := make([]string, 0, len(rawTools))
+	for _, t := range rawTools {
+		if tm, ok := t.(map[string]any); ok {
+			if n, ok := tm["name"].(string); ok {
+				tools = append(tools, n)
+			}
+		}
+	}
+	if len(tools) == 0 {
+		return mcpProbeResult{OK: false, Message: "握手成功但未返回任何工具（可能需配置环境变量）"}
+	}
+	return mcpProbeResult{OK: true, Tools: tools, Count: len(tools), Message: fmt.Sprintf("✅ MCP 服务正常，发现 %d 个工具：%s", len(tools), strings.Join(tools, ", "))}
 }
 
 // MCPTemplate describes a one-click MCP server preset (data/mcp_templates.json).
@@ -2382,7 +2687,12 @@ func (a *App) runOneTestCore(bundleID, prompt string, maxTokens int, overrides m
 	if !healthy {
 		a.stopRunner(sess.ID)
 		res.Status = "fail"
+		// 附加 llama-server 真实日志尾部，让用户看到失败的具体原因
+		// （如 mmproj 文件缺失、CUDA 显存不足、非法参数等），而不是笼统报超时。
 		res.Error = "加载超时或进程退出（当前机器可能无法运行该模型）"
+		if tail := a.sessionLogTail(sess.ID, 8); len(tail) > 0 {
+			res.Error += "。最近日志：\n" + strings.Join(tail, "\n")
+		}
 		return res
 	}
 	// 预热（可选）：首请求通常含 CUDA/KV 初始化开销，先发一次小请求
@@ -3323,12 +3633,44 @@ func (a *App) modelDefaults(b *bundle.Bundle, port int) map[string]any {
 		"port":         port,
 	}
 	if b.MMProj.Path != "" {
-		m["mmproj"] = b.MMProj.Path
+		if mmPath := a.resolveMMProj(b); mmPath != "" {
+			m["mmproj"] = mmPath
+		}
 	}
 	if bundleIsMTP(b) {
 		m["spec_type"] = "draft-mtp"
 	}
 	return m
+}
+
+// resolveMMProj returns a usable vision-encoder (mmproj) path for the bundle,
+// or "" if none is available. If the persisted companion path is stale (the
+// file no longer exists — e.g. it was renamed/removed after binding), it falls
+// back so loading a vision model never fails just because of a dead binding:
+//  1. same path minus ".gguf" (some dirs keep mmproj-BF16 without the suffix)
+//  2. any existing mmproj file in the same directory (DetectCompanions)
+//
+// Otherwise the --mmproj flag is simply omitted (model still loads, CPU-only).
+func (a *App) resolveMMProj(b *bundle.Bundle) string {
+	p := b.MMProj.Path
+	if p != "" {
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+			return p
+		}
+		if strings.HasSuffix(strings.ToLower(p), ".gguf") {
+			alt := strings.TrimSuffix(p, ".gguf")
+			if fi, err := os.Stat(alt); err == nil && !fi.IsDir() {
+				return alt
+			}
+		}
+	}
+	hints := bundle.DetectCompanions(b.BaseModel.Path)
+	if hints.MMProj != "" {
+		if fi, err := os.Stat(hints.MMProj); err == nil && !fi.IsDir() {
+			return hints.MMProj
+		}
+	}
+	return ""
 }
 
 // bundleIsMTP reports whether a bundle carries an MTP speculative-decoding
@@ -3489,9 +3831,18 @@ var startTime = time.Now()
 func main() {
 	parseCmd := flag.NewFlagSet("parse", flag.ExitOnError)
 	_ = parseCmd
-	if len(os.Args) > 1 && os.Args[1] == "parse" {
-		runParse(os.Args[2:])
-		return
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "parse":
+			runParse(os.Args[2:])
+			return
+		case "websearch-mcp":
+			// 内置免 Key 搜索 MCP server（Bing 后端，国内可直连）。
+			if err := websearch.RunMCP(); err != nil {
+				log.Fatalf("websearch-mcp: %v", err)
+			}
+			return
+		}
 	}
 
 	host := flag.String("host", "127.0.0.1", "监听地址")

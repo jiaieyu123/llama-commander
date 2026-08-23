@@ -3280,9 +3280,11 @@
       if (fixed.length) parts.push('📌 固定: ' + fixed.join(', '));
       const detail = parts.join('　|　');
       if (total > CAP) {
-        est.textContent = '⚠️ ' + detail + '（' + dur + '），超过上限 ' + CAP + '。可改用「🔍 智能寻优」模式，或只扫 1-2 个参数。';
+        // 超限不拒绝：自动降级为分层覆盖采样（每个参数每档至少测一次）
+        const sampled = Math.min(total, CAP);
+        const dur2 = fmtDur(sampled * PER_COMBO_SEC);
+        est.textContent = '⚠️ 穷举 ' + total + ' 种超上限（' + CAP + '），将自动「覆盖采样」≈' + sampled + ' 种代表组合（保证每个参数每档都测到，' + dur2 + '）' + fixedTxt + '。点击开始即可运行。';
         est.className = 'sweep-est warn';
-        disabled = true;
       } else {
         est.textContent = detail + '（' + dur + '）' + untouchedTxt;
         est.className = 'sweep-est';
@@ -3327,6 +3329,10 @@
     }) }).then(function (res) {
       sweepJobId = (res && res.job_id) || null;
       if (sweepJobId) $('test-cancel').hidden = false;
+      // 超限自动采样提示
+      if (res && res.sampled) {
+        $('test-summary').textContent = '🔬 穷举 ' + (res.original_total || '?') + ' 种超限，自动「覆盖采样」测试 ' + (res.total || '') + ' 种代表组合（每个参数每档至少测一次）…';
+      }
       // 用总数预填待测行（仅穷举；智能寻优结果按步骤实时出现）
       if (res && res.total && sweepMode !== 'greedy') {
         const pending = new Array(res.total);

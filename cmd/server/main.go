@@ -3093,22 +3093,30 @@ func castSweepValue(pd *config.ParamDef, raw string) (any, error) {
 	}
 }
 
-// sweepCombos computes the cartesian product of all parameter values and
-// returns the per-combo override maps plus human-readable labels.
-func (a *App) sweepCombos(params []sweepParamReq) ([]map[string]any, []string, error) {
-	type dim struct {
-		key  string
-		lbl  string
-		vals []any
-		strs []string
-	}
-	var dims []dim
+// sweepCap is the max combos tested in exhaustive mode before auto-downsampling.
+const sweepCap = 512
+
+// sweepPlan is the outcome of planning a sweep: either the full cartesian
+// product (within cap) or a stratified coverage sample (when over cap).
+type sweepPlan struct {
+	Combos  []map[string]any
+	Labels  []string
+	Total   int  // 原始笛卡尔积组合数
+	Sampled bool // true = 超限已降级为分层覆盖采样
+}
+
+// planSweep computes the sweep plan. When the full cartesian product exceeds
+// sweepCap it does NOT reject — it falls back to a stratified sample that
+// guarantees every value of every swept parameter appears at least once,
+// then randomly fills up to cap. This keeps big sweeps runnable.
+func (a *App) planSweep(params []sweepParamReq) (sweepPlan, error) {
+	var dims []sweepDim
 	for _, p := range params {
 		pd, ok := a.registry.Get(p.Key)
 		if !ok {
-			return nil, nil, fmt.Errorf("未知参数: %s", p.Key)
+			return sweepPlan{}, fmt.Errorf("未知参数: %s", p.Key)
 		}
-		var d dim
+		var d sweepDim
 		d.key = p.Key
 		for _, raw := range p.Values {
 			raw = strings.TrimSpace(raw)
@@ -3117,7 +3125,7 @@ func (a *App) sweepCombos(params []sweepParamReq) ([]map[string]any, []string, e
 			}
 			v, err := castSweepValue(pd, raw)
 			if err != nil {
-				return nil, nil, fmt.Errorf("%s: %v", p.Key, err)
+				return sweepPlan{}, fmt.Errorf("%s: %v", p.Key, err)
 			}
 			d.vals = append(d.vals, v)
 			d.strs = append(d.strs, raw)
@@ -3129,27 +3137,73 @@ func (a *App) sweepCombos(params []sweepParamReq) ([]map[string]any, []string, e
 		dims = append(dims, d)
 	}
 	if len(dims) == 0 {
-		return nil, nil, errors.New("请至少为一个参数填写数值")
+		return sweepPlan{}, errors.New("请至少为一个参数填写数值")
 	}
 	total := 1
 	for _, d := range dims {
 		total *= len(d.vals)
 	}
-	if total > 512 {
-		return nil, nil, fmt.Errorf("组合数 %d 超过上限 512，请减少参数值", total)
+	plan := sweepPlan{Total: total}
+	if total <= sweepCap {
+		combos, labels := enumerateDims(dims)
+		plan.Combos = combos
+		plan.Labels = labels
+		return plan, nil
+	}
+	// 超限 → 分层覆盖采样：每个参数每档至少一次，再随机补足到 cap
+	plan.Sampled = true
+	keyOf := comboKeyOf
+	seen := map[string]bool{}
+	sampled := make([]map[string]any, 0, sweepCap)
+	for _, d := range dims {
+		for _, v := range d.vals {
+			ov := make(map[string]any, len(dims))
+			for _, d2 := range dims {
+				if d2.key != d.key {
+					ov[d2.key] = d2.vals[rand.IntN(len(d2.vals))]
+				}
+			}
+			ov[d.key] = v
+			if k := keyOf(ov); !seen[k] {
+				seen[k] = true
+				sampled = append(sampled, ov)
+			}
+		}
+	}
+	for len(sampled) < sweepCap && len(seen) < total {
+		ov := make(map[string]any, len(dims))
+		for _, d := range dims {
+			ov[d.key] = d.vals[rand.IntN(len(d.vals))]
+		}
+		if k := keyOf(ov); !seen[k] {
+			seen[k] = true
+			sampled = append(sampled, ov)
+		}
+	}
+	plan.Combos = sampled
+	plan.Labels = make([]string, len(sampled))
+	for i, ov := range sampled {
+		plan.Labels[i] = dimsLabel(ov, dims)
+	}
+	return plan, nil
+}
+
+// enumerateDims returns the full cartesian product of dims with labels.
+func enumerateDims(dims []sweepDim) ([]map[string]any, []string) {
+	total := 1
+	for _, d := range dims {
+		total *= len(d.vals)
 	}
 	combos := make([]map[string]any, 0, total)
 	labels := make([]string, 0, total)
 	idx := make([]int, len(dims))
 	for {
 		ov := make(map[string]any, len(dims))
-		parts := make([]string, 0, len(dims))
 		for i, d := range dims {
 			ov[d.key] = d.vals[idx[i]]
-			parts = append(parts, fmt.Sprintf("%s=%s", d.lbl, d.strs[idx[i]]))
 		}
 		combos = append(combos, ov)
-		labels = append(labels, strings.Join(parts, ", "))
+		labels = append(labels, dimsLabel(ov, dims))
 		k := len(dims) - 1
 		for k >= 0 {
 			idx[k]++
@@ -3163,7 +3217,46 @@ func (a *App) sweepCombos(params []sweepParamReq) ([]map[string]any, []string, e
 			break
 		}
 	}
-	return combos, labels, nil
+	return combos, labels
+}
+
+// dimsLabel builds a human-readable label for a combo from dims.
+func dimsLabel(ov map[string]any, dims []sweepDim) string {
+	parts := make([]string, 0, len(dims))
+	for _, d := range dims {
+		for i, v := range d.vals {
+			if fmt.Sprintf("%v", v) == fmt.Sprintf("%v", ov[d.key]) {
+				parts = append(parts, d.lbl+"="+d.strs[i])
+				break
+			}
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+// comboKeyOf builds a stable dedupe key for a combo map.
+func comboKeyOf(ov map[string]any) string {
+	var ks []string
+	for k := range ov {
+		ks = append(ks, k)
+	}
+	sort.Strings(ks)
+	parts := make([]string, 0, len(ks))
+	for _, k := range ks {
+		parts = append(parts, k+"="+fmt.Sprintf("%v", ov[k]))
+	}
+	return strings.Join(parts, "|")
+}
+
+// sweepCombos computes the cartesian product of all parameter values and
+// returns the per-combo override maps plus human-readable labels. Kept for
+// compatibility; callers should prefer planSweep.
+func (a *App) sweepCombos(params []sweepParamReq) ([]map[string]any, []string, error) {
+	plan, err := a.planSweep(params)
+	if err != nil {
+		return nil, nil, err
+	}
+	return plan.Combos, plan.Labels, nil
 }
 
 // handleTestSweep tests one model across many parameter combinations and
@@ -3193,6 +3286,9 @@ func (a *App) handleTestSweep(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	plan, _ := a.planSweep(req.Params)
+	combos = plan.Combos
+	labels = plan.Labels
 	// 预算控制（防呆）：用户设定了最大测试组合数则截断，杜绝无限扫描
 	if req.MaxCombos > 0 && len(combos) > req.MaxCombos {
 		combos = combos[:req.MaxCombos]
@@ -3200,7 +3296,10 @@ func (a *App) handleTestSweep(w http.ResponseWriter, r *http.Request) {
 	}
 	opts := &testRunOpts{Repeats: req.Repeats, Warmup: req.Warmup, Ctx: req.Ctx}
 	jobID := fmt.Sprintf("sweep_%d", time.Now().UnixNano())
-	a.writeJSON(w, http.StatusOK, map[string]any{"job_id": jobID, "total": len(combos)})
+	a.writeJSON(w, http.StatusOK, map[string]any{
+		"job_id": jobID, "total": len(combos),
+		"sampled": plan.Sampled, "original_total": plan.Total,
+	})
 
 	go func() {
 		defer func() {

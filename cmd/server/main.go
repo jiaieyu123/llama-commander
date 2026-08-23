@@ -47,7 +47,7 @@ import (
 )
 
 // Version of the manager itself.
-const Version = "0.2.4"
+const Version = "0.2.5"
 
 // Launch error sentinels, mapped to HTTP statuses in the handlers.
 var (
@@ -1752,7 +1752,7 @@ func mcpStdioProbe(command string, args []string, env map[string]string, timeout
 	resp, err := tryHandshake(1, "initialize", map[string]any{
 		"protocolVersion": "2025-06-18",
 		"capabilities":    map[string]any{},
-		"clientInfo":      map[string]any{"name": "llama-launcher", "version": "0.2.4"},
+		"clientInfo":      map[string]any{"name": "llama-launcher", "version": "0.2.5"},
 	})
 	if err != nil {
 		return mcpProbeResult{OK: false, Message: err.Error() + "；命令可执行但 MCP 握手未完成（可能包不完整或环境变量缺失）" + (func() string {

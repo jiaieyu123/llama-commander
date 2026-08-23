@@ -851,7 +851,9 @@
       if (!el) return;
       if (el.type === 'checkbox') { p[k] = el.checked; return; }
       const v = el.value.trim();
-      if (v !== '') {
+      // mmproj_device: llama.cpp 显式传 --mmproj-device auto 会报 invalid device: auto，
+      // auto 是默认行为 → 值等于 auto 时视为未设置（不发送）
+      if (v !== '' && !(k === 'mmproj_device' && v === 'auto')) {
         p[k] = /^-?\d+(\.\d+)?$/.test(v) ? (v.indexOf('.') >= 0 ? parseFloat(v) : parseInt(v, 10)) : v;
       }
     });
@@ -2772,8 +2774,8 @@
       presets: [['0,4,8,16', '全覆盖'], ['0,4,8', '三档'], ['0', '不用'], ['8', '固定8']] },
     { key: 'no_mmproj_offload', label: 'mmproj 走 CPU', type: 'bool', hint: '省显存给主模型', def: '', ph: 'on / off',
       presets: [['on,off', '开 vs 关'], ['on', '开启'], ['off', '关闭']] },
-    { key: 'mmproj_device', label: 'mmproj 设备', type: 'string', hint: '投影器设备（v0.2.0 新增）', def: '', ph: 'auto / 0 / none',
-      presets: [['auto', '自动'], ['0', 'GPU 0'], ['none', '不卸载']] },
+    { key: 'mmproj_device', label: 'mmproj 设备', type: 'string', hint: '投影器设备：留空=自动，none=不卸载，或设备号如 0（v0.2.0 新增）', def: '', ph: '留空 / 0 / none',
+      presets: [['0', 'GPU 0'], ['1', 'GPU 1'], ['none', '不卸载']] },
     { key: 'reasoning_effort', label: '推理努力', type: 'enum', hint: '推理模型思考强度', def: '', ph: 'low / medium / high',
       presets: [['low,medium,high', '三档'], ['medium,high', '两档'], ['low', '低'], ['high', '高']] },
     { key: 'sampler_seq', label: '简化采样序列', type: 'string', hint: '单字符采样链', def: '', ph: '如 edskypmxt',

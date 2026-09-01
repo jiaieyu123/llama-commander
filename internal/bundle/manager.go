@@ -5,9 +5,12 @@ package bundle
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -94,6 +97,14 @@ type TestConfig struct {
 	Params    map[string]any `json:"params"`
 	Meta      TestConfigMeta `json:"meta"`
 	CreatedAt string         `json:"created_at"`
+	Baseline  bool           `json:"baseline,omitempty"` // 每模型至多一个基线配置
+	RunRef    *RunRef        `json:"run_ref,omitempty"`  // 关联的测试 Run（S1 血缘追溯）
+}
+
+// RunRef points at a TestRun entity for provenance (config → run).
+type RunRef struct {
+	RunID   string `json:"run_id"`
+	ItemIdx int    `json:"item_idx"`
 }
 
 // TestConfigMeta records how well the configuration scored when tested.
@@ -303,6 +314,18 @@ func (m *Manager) Get(id string) (*Bundle, bool) {
 	return b, ok
 }
 
+// GetSHA256 returns the SHA256 hash of a bundle's base model file, or empty
+// string if the bundle doesn't exist or hash is not computed.
+func (m *Manager) GetSHA256(id string) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	b, ok := m.bundles[id]
+	if !ok {
+		return ""
+	}
+	return b.BaseModel.SHA256
+}
+
 // FindByPath returns the existing bundle whose base model path matches the
 // given file path (case-insensitive, path-normalized). Used to reject
 // duplicate imports so re-scanning a folder never re-adds the same model.
@@ -416,6 +439,21 @@ func (m *Manager) RemoveTestConfig(id, cfgID string) error {
 	return m.Save()
 }
 
+// computeFileSHA256 calculates the SHA256 hash of a file.
+// Returns empty string if the file cannot be read.
+func computeFileSHA256(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 // AddFromGGUF parses a GGUF file and creates a bundle automatically,
 // including companion detection (mmproj/draft/lora). name may be empty;
 // it is inferred from the file name.
@@ -423,6 +461,10 @@ func (m *Manager) AddFromGGUF(path, name string, parseMetadata bool) (*Bundle, e
 	b, err := NewFromGGUF(path, name, CompanionHints{})
 	if err != nil {
 		return nil, err
+	}
+	// Compute SHA256 if not already set
+	if b.BaseModel.SHA256 == "" {
+		b.BaseModel.SHA256 = computeFileSHA256(path)
 	}
 	if err := m.Add(b); err != nil {
 		return nil, err

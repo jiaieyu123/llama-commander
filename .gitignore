@@ -27,3 +27,11 @@ web/dist/
 
 # ���Ը��������
 coverage
+
+# 本地调试/临时文件
+scripts/_inspect*.js
+scripts/_sweep_patch*.js
+scripts/_inspect_out.txt
+start_graphify.bat
+graphify-out/
+项目结构.txt

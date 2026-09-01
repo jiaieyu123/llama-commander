@@ -57,7 +57,6 @@
 
   function $(id) { return document.getElementById(id); }
 
-  // 生成随机 API Key（256 位，sk- 前缀），免手打
   function genAPIKey() {
     const bytes = new Uint8Array(32);
     if (window.crypto && crypto.getRandomValues) crypto.getRandomValues(bytes);
@@ -68,21 +67,39 @@
     return 'sk-' + s;
   }
 
-  // 复制到剪贴板（含降级方案），按钮短暂显示反馈
   function flashBtn(btn, text) {
     const old = btn.textContent;
     btn.textContent = text;
     setTimeout(function () { btn.textContent = old; }, 1200);
   }
-  // 对 <select> 的“闪一下”反馈：绝不能像按钮那样改 textContent（会清空所有
-  // <option>，导致下拉框无法再选择且缩成一条），改用临时 CSS 高亮 class。
+
+  // ★ 全局 toast 提示（明显的操作反馈）
+  function showToast(msg, type) {
+    let wrap = $('toast-wrap');
+    if (!wrap) {
+      wrap = document.createElement('div');
+      wrap.id = 'toast-wrap';
+      wrap.className = 'toast-wrap';
+      document.body.appendChild(wrap);
+    }
+    const el = document.createElement('div');
+    el.className = 'toast ' + (type || 'info');
+    el.innerHTML = msg;
+    wrap.appendChild(el);
+    setTimeout(function () {
+      el.classList.add('out');
+      setTimeout(function () { el.remove(); }, 300);
+    }, 3200);
+  }
+
   function flashSelect(sel) {
     if (!sel) return;
     sel.classList.remove('flash-ok');
-    void sel.offsetWidth; // 强制重排以重新触发动画
+    void sel.offsetWidth;
     sel.classList.add('flash-ok');
     setTimeout(function () { sel.classList.remove('flash-ok'); }, 1200);
   }
+
   function fallbackCopy(txt) {
     const ta = document.createElement('textarea');
     ta.value = txt;
@@ -93,6 +110,7 @@
     try { document.execCommand('copy'); } catch (e) { /* 忽略 */ }
     document.body.removeChild(ta);
   }
+
   function copyKey(txt, btn) {
     if (!txt) { flashBtn(btn, '空'); return; }
     const ok = function () { flashBtn(btn, '✓'); };
@@ -100,12 +118,13 @@
       navigator.clipboard.writeText(txt).then(ok).catch(function () { fallbackCopy(txt); ok(); });
     } else { fallbackCopy(txt); ok(); }
   }
+
   function toggleKeyVisibility(input, btn) {
-    // 已保存加密 Key 且尚未回显 → 点击时拉取明文显示（不点就不加载明文）
     if (input.type === 'password' && !input.value && cfgHasAPIKey) {
       api(API.configKey).then(function (r) {
         input.value = r.key || '';
-        input.type = 'text'; btn.textContent = '🙈';
+        input.type = 'text';
+        btn.textContent = '🙈';
       }).catch(function () { flashBtn(btn, '✗'); });
       return;
     }
@@ -113,7 +132,6 @@
     else { input.type = 'password'; btn.textContent = '👁'; }
   }
 
-  // 打开界面时自动把全局 API Key 填入主面板输入框（仅输入框为空时，不覆盖手动输入）
   function autoFillGlobalKey() {
     const el = $('p-api_key');
     if (!el || el.value.trim() !== '') return;
@@ -132,7 +150,7 @@
     refreshAll();
     autoFillGlobalKey();
     setInterval(refreshStatus, 5000);
-    setInterval(updateUptimes, 1000); // 运行时长计时器
+    setInterval(updateUptimes, 1000);
 
     $('btn-refresh-models').addEventListener('click', refreshBundles);
     $('model-select').addEventListener('change', onModelChange);
@@ -141,7 +159,6 @@
     $('btn-optimize').addEventListener('click', onOptimize);
     $('btn-params-help').addEventListener('click', openParamsHelp);
     loadParams();
-    // 数字字段预设下拉 → 选中填入目标输入框并刷新预览
     document.querySelectorAll('.preset[data-target]').forEach(function (sel) {
       sel.addEventListener('change', function () {
         const target = document.getElementById(sel.dataset.target);
@@ -155,7 +172,6 @@
     $('btn-start').addEventListener('click', onStart);
     $('btn-stop').addEventListener('click', onStop);
     $('btn-restart').addEventListener('click', onRestart);
-    // 打开当前选中模型运行实例的 Web 界面
     $('btn-open-ui').addEventListener('click', function () {
       getRunning().then(function (running) {
         if (!running.length) { flashBtn($('btn-open-ui'), '无运行实例'); return; }
@@ -169,7 +185,6 @@
     $('btn-monitor').addEventListener('click', function () { Monitor.open(); });
     $('btn-monitor-refresh').addEventListener('click', function () { Monitor.refresh(); });
     $('btn-monitor-export').addEventListener('click', function () { Monitor.export(); });
-    // 概览页内嵌监控的刷新/导出按钮（与监控弹窗共用数据）
     const monR2 = $('btn-monitor-refresh2');
     if (monR2) monR2.addEventListener('click', function () { Monitor.refresh(); flashBtn(monR2, '已刷新'); });
     const monE2 = $('btn-monitor-export2');
@@ -181,7 +196,6 @@
     $('mcp-add').addEventListener('click', addMCP);
     $('btn-settings').addEventListener('click', openSettings);
     $('set-save').addEventListener('click', saveSettings);
-    // ── 🔑 全局 API Key 专属板块 ──────────
     $('btn-apikey').addEventListener('click', openAPIKeyModal);
     $('ak-refresh').addEventListener('click', function () { loadAPIKeyState(); loadSysResource(); renderAPIKeyMonitor(); });
     $('ak-key-gen').addEventListener('click', function () {
@@ -192,7 +206,6 @@
     $('ak-key-copy').addEventListener('click', function () {
       const kInput = $('ak-api-key');
       if (!kInput.value && cfgHasAPIKey) {
-        // 已保存但未回显 → 拉取明文直接复制
         api(API.configKey).then(function (r) {
           if (r.key) copyKey(r.key, $('ak-key-copy'));
           else flashBtn($('ak-key-copy'), '空');
@@ -209,15 +222,12 @@
     });
     $('ak-key-save').addEventListener('click', saveAPIKey);
     $('ak-api-key').addEventListener('input', function () { akAPIKeyChanged = true; });
-    // ── 🔎 搜索 API Key（Brave/Tavily）─────────
     $('ak-brave-toggle').addEventListener('click', akBraveToggleVisibility);
     $('ak-tavily-toggle').addEventListener('click', akTavilyToggleVisibility);
     $('ak-search-save').addEventListener('click', saveSearchKeys);
     $('ak-brave-key').addEventListener('input', function () { akBraveKeyChanged = true; });
     $('ak-tavily-key').addEventListener('input', function () { akTavilyKeyChanged = true; });
-    // 🔍 草稿模型自动匹配交互（🪄 按钮 / 候选下拉 / 手动输入校验）
     bindDraftMatchUI();
-    // 关闭专属板块 → 停止实时刷新定时器
     document.querySelectorAll('#apikey-modal [data-close]').forEach(function (btn) {
       btn.addEventListener('click', closeAPIKeyModal);
     });
@@ -237,6 +247,12 @@
     });
     $('test-cancel').addEventListener('click', cancelTestRun);
     $('test-export').addEventListener('click', exportTestReport);
+    if ($('test-savesnap')) $('test-savesnap').addEventListener('click', function () { saveCurrentSnapshot(false); });
+    if ($('btn-snap-rename')) $('btn-snap-rename').addEventListener('click', function () { saveCurrentSnapshot(true); });
+    if ($('btn-savecfg-rename')) $('btn-savecfg-rename').addEventListener('click', function () { saveBestConfig(true); });
+    if ($('snap-confirm')) $('snap-confirm').addEventListener('click', function () { confirmSnapshot(); });
+    if ($('snap-cancel')) $('snap-cancel').addEventListener('click', cancelSnapshot);
+    if ($('hist-filter')) $('hist-filter').addEventListener('change', renderTestHistory);
     $('btn-hist-clear').addEventListener('click', clearTestHistory);
     $('btn-hist-refresh').addEventListener('click', renderTestHistory);
     $('test-start').addEventListener('click', onTestStart);
@@ -245,11 +261,12 @@
     $('test-models').addEventListener('change', function (e) {
       if (e.target && e.target.classList && e.target.classList.contains('tm')) updateTestModelCount();
     });
-    $('test-savecfg').addEventListener('click', saveBestConfig);
-    $('savecfg-confirm').addEventListener('click', saveConfigNow);
+    $('test-savecfg').addEventListener('click', function () { saveBestConfig(false); });
+    $('savecfg-confirm').addEventListener('click', function () { saveConfigNow(); });
     $('savecfg-cancel').addEventListener('click', function () {
       $('savecfg-row').hidden = true;
       $('test-savecfg').hidden = false;
+      if ($('btn-savecfg-rename')) $('btn-savecfg-rename').hidden = false;
     });
     $('test-tabs').addEventListener('click', function (e) {
       const btn = e.target.closest('.tab');
@@ -262,6 +279,7 @@
         sweepItems = [];
         sweepBest = -1;
         $('test-summary').textContent = '';
+        resetTestProgress();
         lastBest = null;
         $('test-savecfg').hidden = true;
         $('savecfg-row').hidden = true;
@@ -276,6 +294,8 @@
       c.addEventListener('click', function () { applyScenario(c.dataset.scenario); });
     });
     $('btn-sweep-clear').addEventListener('click', clearAllSweepParams);
+    if ($('btn-sweep-all')) $('btn-sweep-all').addEventListener('click', showAllSweepParams);
+    if ($('sweep-add-search')) $('sweep-add-search').addEventListener('input', sweepAddFilter);
     $('sweep-radar-close').addEventListener('click', function () { $('sweep-radar-wrap').hidden = true; });
     $('btn-sweep-settings').addEventListener('click', function () {
       const box = $('sweep-settings');
@@ -284,7 +304,6 @@
     });
     $('sweep-add-param').addEventListener('change', onAddSweepParam);
     $('sweep-chart-metric').addEventListener('change', renderSweepChart);
-    // 参数审计展开（sweep 结果行 📋）——事件委托，重渲染后仍有效
     $('sweep-result').addEventListener('click', function (e) {
       const btn = e.target.closest('.t-audit');
       if (!btn) return;
@@ -297,7 +316,6 @@
       div.innerHTML = auditTableHTML(it.audit);
       btn.closest('.test-row').after(div);
     });
-    // 参数审计展开（batch 结果行 📋）
     $('test-result').addEventListener('click', function (e) {
       const btn = e.target.closest('.t-audit');
       if (!btn) return;
@@ -325,7 +343,6 @@
     $('hf-repo').addEventListener('keydown', function (e) { if (e.key === 'Enter') listHFFiles(); });
     $('cache-refresh').addEventListener('click', loadCache);
 
-    // API 调试面板
     $('dbg-add-msg').addEventListener('click', addMsgRow);
     $('dbg-send').addEventListener('click', sendDebug);
     $('dbg-stop').addEventListener('click', stopDebug);
@@ -336,7 +353,6 @@
     });
     $('scan-go').addEventListener('click', scanDir);
     $('scan-import').addEventListener('click', importSelected);
-    // 文件/目录浏览器
     $('scan-browse').addEventListener('click', function () { openFSBrowser('dir', 'scan-dir'); });
     $('set-cache-browse').addEventListener('click', function () { openFSBrowser('dir', 'set-cache-dir'); });
     $('fs-go').addEventListener('click', function () { loadFS($('fs-path').value.trim()); });
@@ -347,22 +363,17 @@
     $('fs-select').addEventListener('click', selectFSDir);
     $('fs-path').addEventListener('keydown', function (e) { if (e.key === 'Enter') loadFS($('fs-path').value.trim()); });
 
-    // 弹窗关闭：只通过 ✕ / 关闭按钮关闭。
-    // （不监听遮罩点击——避免用户在弹窗外的区域误点导致弹窗意外关闭。）
     document.querySelectorAll('.modal-overlay').forEach(function (ov) {
       ov.querySelectorAll('[data-close]').forEach(function (btn) {
         btn.addEventListener('click', function () { ov.hidden = true; });
       });
     });
 
-    // 主区域 Tab 切换（🏠概览 / ⚙️模型配置 / 🚀运行实例 / 📋控制台）
     document.querySelectorAll('#main-tabs .main-tab').forEach(function (b) {
       b.addEventListener('click', function () { switchMainTab(b.dataset.mtab); });
     });
     switchMainTab('setup');
 
-    // ── SaaS 侧边栏交互 ──
-    // 侧边栏折叠 / 汉堡（窄屏离屏抽屉）
     const sbToggle = $('btn-sidebar-toggle');
     if (sbToggle) sbToggle.addEventListener('click', function () {
       if (window.innerWidth <= 900) {
@@ -371,7 +382,6 @@
         document.body.classList.toggle('sidebar-collapsed');
       }
     });
-    // 侧边栏全局搜索：实时过滤模型库，Enter 选中并切到配置页
     const sbSearch = $('sidebar-search');
     if (sbSearch) sbSearch.addEventListener('keydown', function (e) {
       if (e.key === 'Enter') {
@@ -385,25 +395,21 @@
         }
       }
     });
-    // 促销卡「快速启动」→ 切到配置页并触发启动
     const qs = $('btn-quick-start');
     if (qs) qs.addEventListener('click', function () {
       switchMainTab('setup');
       if (selectedId) onStart(); else flashBtn(qs, '请先选择模型');
     });
-    // 通知铃铛（简单提示）
     const nf = $('btn-notify');
     if (nf) nf.addEventListener('click', function () {
       flashBtn(nf, '暂无新通知');
     });
-    // 顶栏刷新按钮
     const trf = $('btn-top-refresh');
     if (trf) trf.addEventListener('click', function () {
       refreshAll();
       flashBtn(trf, '已刷新');
     });
 
-    // 界面动态设置：恢复上次偏好 + 绑定主题/布局/紧凑切换
     applyUISettings(loadUISettings());
     ['ui-theme', 'ui-layout'].forEach(function (id) {
       const el = $(id);
@@ -411,12 +417,26 @@
     });
     const uiCp = $('ui-compact');
     if (uiCp) uiCp.addEventListener('change', saveUISettings);
-    // 场景预设：一键应用常见使用场景的最佳参数组合
     $('scenario-preset').addEventListener('change', function () {
       if (this.value) applyScenarioPreset(this.value);
     });
     $('btn-scenario-clear').addEventListener('click', function () {
       $('scenario-preset').value = '';
+      // 一键还原为官方默认值：填入每个参数的官方默认值（registry default）+ 模型默认 + MTP 自动勾选
+      document.querySelectorAll('[id^="p-"]').forEach(function (el) {
+        if (el.type === 'checkbox') { el.checked = false; return; }
+        if (el.tagName === 'SELECT') { if (el.options && el.options.length) el.selectedIndex = 0; return; }
+        if (el.value !== undefined) el.value = '';
+      });
+      const id = $('model-select').value;
+      const b = bundles.find(function (x) { return x.id === id; });
+      applyOfficialDefaults(b);
+      const specEl = $('p-spec_type');
+      if (specEl && window.__isMtp && !specEl.checked) specEl.checked = true;
+      if (specEl && specEl.checked) autoMatchDraft(id, false);
+      refreshPreview();
+      runAudit();
+      showToast('已填入官方默认值（llama.cpp 默认）', 'ok');
       flashBtn($('btn-scenario-clear'), '已还原');
     });
     $('scan-dir').addEventListener('keydown', function (e) { if (e.key === 'Enter') scanDir(); });
@@ -425,7 +445,6 @@
       chip.addEventListener('click', function () { applyPreset(chip.dataset.preset); });
     });
 
-    // 参数变化 → 实时命令预览 + 实时审计（风险提示）
     var auditTimer = null;
     document.querySelectorAll('#config-panel input, #config-panel select').forEach(function (el) {
       el.addEventListener('input', function () { refreshPreview(); scheduleAudit(); });
@@ -494,7 +513,6 @@
           ${comps.length ? '<br>' + esc(comps.join(' | ')) : ''}
           <br><span style="word-break:break-all">${esc(m.path || '-')}</span>
         </div>`;
-      // 已保存的测试配置列表
       const cfgs = (b.test_configs || []).map(function (c) {
         const cm = c.meta || {};
         const tag = [];
@@ -525,7 +543,7 @@
   function openLibrary() { $('library-drawer').classList.add('open'); }
   function closeLibrary() { $('library-drawer').classList.remove('open'); }
 
-  // ── 上下文预设（随模型最大上下文动态生成）──────────
+  // ── 上下文预设 ──────────────────────────
   const DEFAULT_CTX_PRESET_HTML = '<option value="">▾ 预设</option>' +
     '<option value="2048">2048 短对话</option><option value="4096">4096 标准</option>' +
     '<option value="8192">8192 长对话</option><option value="16384">16384 长文档</option>' +
@@ -574,34 +592,22 @@
     const vis = (b.mmproj && b.mmproj.path) ? '已绑定' : '未绑定';
     const draft = (b.draft_model && b.draft_model.enabled) ? b.draft_model.spec_type : '未启用';
     const mcp = (b.mcp_servers && b.mcp_servers.length) ? b.mcp_servers.join(', ') : '无';
-    // MTP 检测：文件名/路径含 mtp|nextn（nextn = llama.cpp 下一 token 网络张量
-    // 前缀，很多带 MTP 头的模型如 Qwen-VL 文件名不含 mtp）或带 mtp 标签。
     const _n = ((b.name || '') + ' ' + ((b.base_model || {}).path || '')).toLowerCase();
     const isMtp = _n.includes('mtp') || _n.includes('nextn') || (b.tags || []).includes('mtp');
     window.__isMtp = isMtp;
-    // 能力徽标：MTP（兼容旧 bundle tags 缺失）+ 其他能力标签
     const badges = tagBadges(b.tags || []);
-    // 避免 MTP 徽标重复（tags 含 mtp 时 tagBadges 已出，这里仅兜底文件名检测）
     const capStr = ((isMtp && !(b.tags || []).includes('mtp') ? '🧩 MTP ' : '') + badges).trim();
     meta.textContent = `📷 视觉: ${vis} | ⚡ 草稿: ${draft} | 🧩 MCP: ${mcp} | 🏷️ 能力: ${capStr || '—'}`;
 
-    // mmproj 字段提示自动检测路径（留空=自动）
     const mmEl = $('p-mmproj');
     if (mmEl) mmEl.placeholder = (b.mmproj && b.mmproj.path) ? '自动: ' + b.mmproj.path : '未检测到 mmproj，可手动填写';
 
-    // 🧩 投机解码组始终显示（MTP 模型或外部草稿模型都能用）。
-    // MTP 模型默认勾选启用 draft-mtp（用主模型自带 MTP 头投机），避免 MTP
-    // 张量被当作 unused tensor 忽略；普通模型需填独立草稿模型才会生效。
     const specEl = $('p-spec_type');
     if (specEl && isMtp && !specEl.checked) specEl.checked = true;
-    // MTP 模型：清空外部草稿路径（用自带头），避免误填跨模型草稿
     if (isMtp && $('p-model_draft')) $('p-model_draft').value = '';
 
-    // 🔍 自动匹配草稿模型：调用后端按同目录/同架构智能推荐，填入 p-model_draft
-    // applyIfChecked=true：仅当勾选了「启用投机解码」才自动填草稿值，否则留空（不使用）
     autoMatchDraft(id, true);
 
-    // 用模型默认参数填充表单
     const dp = b.default_params || {};
     if (dp.ctx_size) $('p-ctx_size').value = dp.ctx_size;
     if (dp.n_gpu_layers !== undefined) $('p-n_gpu_layers').value = dp.n_gpu_layers;
@@ -609,12 +615,10 @@
     if (dp.load_mode) $('p-load_mode').value = dp.load_mode;
     if (dp.cpu_moe) $('p-cpu_moe').checked = true;
 
-    // 上下文预设：随模型最大上下文动态生成（25% / 50% / 75% / 原生最大）
     const maxCtx = Number(((b.base_model || {}).metadata || {}).context_length || 0);
     const pCtxSel = $('p-ctx_size') ? $('p-ctx_size').closest('.num-wrap').querySelector('.preset') : null;
     fillCtxPreset(pCtxSel, maxCtx, DEFAULT_CTX_PRESET_HTML);
 
-    // 测试配置选择器：列出该模型已保存的最优配置
     const cfgSel = $('test-config-select');
     const cfgRow = $('cfg-row-configs');
     const cfgs = b.test_configs || [];
@@ -643,7 +647,26 @@
     runAudit();
   }
 
-  // ── 一键优化（接入后端 VRAM 估算）────
+  // ★ 新增：只更新元数据展示，不重填表单（S2）
+  function onModelChangeMeta() {
+    const id = $('model-select').value;
+    const b = bundles.find(x => x.id === id);
+    const meta = $('bundle-meta');
+    if (!b) {
+      meta.textContent = '📷 视觉: — | ⚡ 草稿: 未启用 | 🏷️ 能力: —';
+      return;
+    }
+    const vis = (b.mmproj && b.mmproj.path) ? '已绑定' : '未绑定';
+    const draft = (b.draft_model && b.draft_model.enabled) ? b.draft_model.spec_type : '未启用';
+    const mcp = (b.mcp_servers && b.mcp_servers.length) ? b.mcp_servers.join(', ') : '无';
+    const _n = ((b.name || '') + ' ' + ((b.base_model || {}).path || '')).toLowerCase();
+    const isMtp = _n.includes('mtp') || _n.includes('nextn') || (b.tags || []).includes('mtp');
+    const badges = tagBadges(b.tags || []);
+    const capStr = ((isMtp && !(b.tags || []).includes('mtp') ? '🧩 MTP ' : '') + badges).trim();
+    meta.textContent = `📷 视觉: ${vis} | ⚡ 草稿: ${draft} | 🧩 MCP: ${mcp} | 🏷️ 能力: ${capStr || '—'}`;
+  }
+
+  // ── 一键优化 ────────────────────────────
   function onOptimize() {
     if (!selectedId) { alert('请先选择模型'); return; }
     const btn = $('btn-optimize');
@@ -660,7 +683,6 @@
         if (rec.load_mode) $('p-load_mode').value = rec.load_mode;
         if (rec.parallel !== undefined && rec.parallel !== null) $('p-parallel').value = rec.parallel;
         $('p-cpu_moe').checked = !!rec.cpu_moe;
-        // 视觉模型纯文本场景：mmproj 走 CPU 省显存给主模型层
         if (rec.mmproj_cpu) $('p-no_mmproj_offload').checked = true;
         const notes = (rec.notes || []).join('；');
         alert('✨ 一键优化完成\n\n' +
@@ -676,9 +698,21 @@
       .finally(function () { btn.disabled = false; btn.textContent = '✨ 一键优化'; });
   }
 
-  // 🔍 自动匹配草稿模型：按主模型同目录/同架构智能推荐，填入 p-model_draft，
-  // 并填充候选下拉（🪄 匹配 按钮 / 下拉选择 均可触发）。手动填了草稿时校验匹配性。
-  // applyIfChecked=true 时仅在勾选了「启用投机解码」才自动填草稿值；否则只填充候选下拉（草稿留空=不使用）。
+  // ★ 草稿格式自动识别：根据草稿模型文件名/主模型 MTP 头推断投机类型
+  function detectDraftType(draftPath, isMtpModel) {
+    if (isMtpModel) return 'draft-mtp';
+    if (!draftPath) return '';
+    const lower = String(draftPath).toLowerCase();
+    if (lower.indexOf('dspark') >= 0) return 'draft-dspark';
+    if (lower.indexOf('dflash') >= 0) return 'draft-dflash';
+    if (lower.indexOf('eagle') >= 0) return 'draft-eagle3';
+    return 'draft-simple';
+  }
+  function draftTypeLabel(t) {
+    return { 'draft-mtp': '🧠 主模型自带 MTP 头', 'draft-simple': '📦 外部草稿模型', 'draft-dspark': '⚡ dSPARK 扩散草稿', 'draft-dflash': '⚡ dFLASH 扩散草稿', 'draft-eagle3': '⚡ EAGLE3 草稿' }[t] || '';
+  }
+
+  // ── 自动匹配草稿 ──────────────────────
   function autoMatchDraft(modelId, applyIfChecked) {
     if (!modelId) return;
     const mdEl = $('p-model_draft');
@@ -687,13 +721,13 @@
     if (!mdEl || !mdHint) return;
     api('/api/bundles/' + modelId + '/match-draft', { method: 'POST', body: '{}' })
       .then(function (r) {
+        const done = function () { refreshPreview(); runAudit(); };
         if (!r || !r.match || !r.match.length) {
-          mdHint.textContent = '';
+          mdHint.textContent = '⚠️ ' + (r && r.empty_reason ? r.empty_reason : '未找到适配的草稿模型：模型库/同目录中没有可投机的草稿，投机解码无法启用。');
           if (candSel) { candSel.innerHTML = '<option value="">🪄 自动匹配草稿…</option>'; }
-          return;
+          return done();
         }
         const top = r.match[0];
-        // 填充候选下拉
         if (candSel) {
           const prev = candSel.value;
           candSel.innerHTML = '<option value="">🪄 自动匹配草稿…</option>' +
@@ -711,22 +745,19 @@
           });
           if (prev) candSel.value = prev;
         }
-        // 主模型自带 MTP 头 → 无需外部草稿
         if (r.has_mtp || (top && !top.path)) {
           if (!mdEl.value.trim()) mdEl.value = '';
           mdHint.textContent = '✅ 主模型自带 MTP 头，启用投机即可（draft-mtp），无需外部草稿。';
-          return;
+          return done();
         }
         const specOn = $('p-spec_type') ? $('p-spec_type').checked : false;
-        // 未启用投机解码：不自动填草稿值（留空=不使用），只提示
         if (applyIfChecked && !specOn) {
           if (mdEl.value === top.path) mdEl.value = '';
-          mdHint.textContent = '💡 未启用投机解码。勾选「🚀 启用投机解码」后将自动匹配草稿；不需要投机可保持留空。';
-          return;
+          mdHint.textContent = '💡 未启用投机解码。勾选「🚀 启用投机解码」后将自动匹配草稿并识别格式；不需要投机可保持关闭。';
+          return done();
         }
         const alreadySet = mdEl.value.trim();
         if (alreadySet) {
-          // 用户已手动填草稿 → 校验是否与推荐匹配
           const cur = alreadySet.replace(/\\/g, '/');
           const isRec = (top.path || '').replace(/\\/g, '/') === cur;
           const sameDir = top.reason && top.reason.indexOf('同目录') === 0;
@@ -735,38 +766,44 @@
           } else {
             mdHint.textContent = '⚠️ 当前草稿与推荐不符（推荐: ' + (top.name || top.path) + '），架构不匹配可能导致启动崩溃。建议改用自动匹配值。';
           }
-          return;
+          return done();
         }
-        // 未手动填 → 自动填入推荐草稿
         if (top.path) {
           mdEl.value = top.path;
           if (candSel) candSel.value = top.path;
-          mdHint.textContent = '🔍 自动匹配草稿: ' + (top.reason || '') + (top.name ? ' · ' + top.name : '') + '（可手动改）';
+          const dt = detectDraftType(top.path, !!window.__isMtp);
+          mdHint.textContent = '🔍 自动匹配草稿: ' + (top.reason || '') + (top.name ? ' · ' + top.name : '') + '　→ 按「' + (draftTypeLabel(dt) || dt || '') + '」投机（可手动改）';
         } else {
           mdEl.value = '';
           mdHint.textContent = '✅ 主模型自带 MTP 头，启用投机即可（draft-mtp），无需外部草稿。';
         }
+        done();
       })
       .catch(function () { /* 匹配失败不阻塞 */ });
   }
 
-  // 绑定草稿自动匹配的交互：🪄 匹配按钮 + 候选下拉选择 + 投机开关联动
   function bindDraftMatchUI() {
     const btn = $('btn-match-draft');
     if (btn) btn.addEventListener('click', function () {
       if (!selectedId) { alert('请先选择模型'); return; }
-      // 用户主动点匹配 → 强制用推荐草稿覆盖当前值
       api('/api/bundles/' + selectedId + '/match-draft', { method: 'POST', body: '{}' })
         .then(function (r) {
           const mdEl = $('p-model_draft');
           const mdHint = $('model-draft-hint');
           const candSel = $('draft-candidate-select');
-          if (!mdEl || !r || !r.match || !r.match.length) return;
+          if (!mdEl || !r) return;
+          if (!r.match || !r.match.length) {
+            if (mdHint) mdHint.textContent = '⚠️ ' + (r.empty_reason || '未找到适配的草稿模型：模型库/同目录中没有可投机的草稿，投机解码无法启用。');
+            if (candSel) candSel.value = '';
+            flashBtn(btn, '✗ 无草稿');
+            return;
+          }
           const top = r.match[0];
           if (top && top.path) {
             mdEl.value = top.path;
             if (candSel) candSel.value = top.path;
-            if (mdHint) mdHint.textContent = '✅ 已自动匹配草稿: ' + (top.reason || '') + (top.name ? ' · ' + top.name : '');
+            const dt = detectDraftType(top.path, !!window.__isMtp);
+            if (mdHint) mdHint.textContent = '✅ 已自动匹配草稿: ' + (top.reason || '') + (top.name ? ' · ' + top.name : '') + '　→ 按「' + (draftTypeLabel(dt) || dt || '') + '」投机';
           } else {
             mdEl.value = '';
             if (mdHint) mdHint.textContent = '✅ 主模型自带 MTP 头，启用投机即可（draft-mtp），无需外部草稿。';
@@ -783,7 +820,6 @@
       const mdHint = $('model-draft-hint');
       if (!mdEl) return;
       if (sel.value === '__none__') {
-        // 🚫 不使用草稿（留空）
         mdEl.value = '';
         if (mdHint) mdHint.textContent = '✅ 已选择不使用草稿模型（投机解码将不启用）。';
       } else if (sel.value) {
@@ -795,12 +831,10 @@
       refreshPreview();
       runAudit();
     });
-    // 手动输入草稿时也触发校验（change 时）
     const mdEl = $('p-model_draft');
     if (mdEl) mdEl.addEventListener('change', function () {
       if (selectedId) autoMatchDraft(selectedId, false);
     });
-    // 「🚀 启用投机解码」勾选联动：勾选→自动匹配草稿；取消→清空草稿
     const specEl = $('p-spec_type');
     if (specEl) specEl.addEventListener('change', function () {
       if (!selectedId) return;
@@ -845,16 +879,26 @@
     sample: '🎨 生成控制', spec: '🧩 投机解码', source: '📥 模型来源', network: '🌐 网络与安全',
     chat: '🧩 模板与推理', log: '📝 日志与调试'
   };
+
   function fmtDefault(d) {
     if (d === undefined || d === null) return '';
     if (typeof d === 'string') return d === '' ? '自动 / 未设置' : d;
     return String(d);
   }
+
   function loadParams() {
     return api(API.params).then(function (r) {
       paramDefs = (r && r.params) || [];
-      applyParamTooltips();
-      // 网络板块 API Key 字段显示全局 Key 配置状态
+      // ★ S6：缓存 Tier 和 Guidance
+      window.__paramTiers = {};
+      window.__paramGuidance = {};
+      paramDefs.forEach(function (p) {
+        window.__paramTiers[p.key] = p.tier || 'core';
+        window.__paramGuidance[p.key] = p.guidance || null;
+      });
+      bindParamHoverTips();
+      enhanceParamFields();
+      addPresetsToAllParams();
       api(API.configGet).then(function (c) {
         const el = $('p-api_key');
         if (!el) return;
@@ -862,25 +906,99 @@
           (c.has_api_key ? '\n\n当前已配置全局 Key，留空会自动注入。' : '\n\n当前未配置全局 Key。');
         el.placeholder = c.has_api_key ? '留空=自动用全局 Key' : '可选（未设全局 Key）';
       }).catch(function () { /* 忽略 */ });
+      // ★ S6：重新渲染扫描参数（如果扫描面板已打开）
+      if (!$('tab-sweep').hidden) {
+        renderSweepParams();
+      }
     }).catch(function () { /* 帮助系统不可用时静默降级 */ });
   }
-  function applyParamTooltips() {
-    paramDefs.forEach(function (p) {
-      const el = $('p-' + p.key);
-      if (!el) return;
-      const parts = [];
-      const def = fmtDefault(p.default);
-      if (def) parts.push('默认: ' + def);
-      if (p.enum && p.enum.length) parts.push('可选: ' + p.enum.join(' / '));
-      el.title = parts.join('\n') + (p.help ? '\n\n' + p.help : '');
+
+  // ★ S7：参数说明 hover 悬浮提示——鼠标悬停任意参数（含 checkbox/select）
+  //    立即显示作用 + 推荐值 + 默认值，无需点击 📖。
+  var _paramTip = null;
+  function getParamTip() {
+    if (_paramTip) return _paramTip;
+    _paramTip = document.createElement('div');
+    _paramTip.id = 'param-tip';
+    var s = _paramTip.style;
+    s.position = 'fixed'; s.zIndex = '99999'; s.maxWidth = '380px'; s.padding = '10px 12px';
+    s.background = '#fff'; s.color = '#333'; s.border = '1px solid #d0d7de'; s.borderRadius = '8px';
+    s.boxShadow = '0 6px 20px rgba(0,0,0,.16)'; s.fontSize = '12px'; s.lineHeight = '1.6';
+    s.pointerEvents = 'none'; s.opacity = '0'; s.transition = 'opacity .12s'; s.display = 'none';
+    document.body.appendChild(_paramTip);
+    return _paramTip;
+  }
+  function paramTipOfField(f) {
+    var inp = f.querySelector('input[id^="p-"], select[id^="p-"]');
+    if (!inp) return null;
+    var key = inp.id.slice(2);
+    var p = null;
+    (paramDefs || []).forEach(function (x) { if (x.key === key) p = x; });
+    var g = window.__paramGuidance && window.__paramGuidance[key];
+    if (!p && !g) return null;
+    return { key: key, def: p ? p.default : null, help: p ? (p.help || '') : '', g: g || null };
+  }
+  function showParamTip(x, y, info, label) {
+    var tip = getParamTip();
+    var title = label || info.key;
+    var html = '<div style="font-weight:600;margin-bottom:4px;color:#1f2937">' + esc(title) + '</div>';
+    var desc = (info.g && info.g.description) || info.help;
+    // 去掉与标题重复的开头（如 描述"温度（0-2）..." 标题"温度"），保留括号
+    if (desc && title && desc.indexOf(title) === 0) {
+      desc = desc.slice(title.length).replace(/^[\s:：]+/, '');
+    }
+    if (desc) html += '<div>' + esc(desc) + '</div>';
+    var rec = info.g && info.g.recommendation;
+    if (rec) html += '<div style="margin-top:5px;color:#2e7d32;font-weight:500">✅ ' + esc(rec) + '</div>';
+    if (info.def !== undefined && info.def !== null && info.def !== '') {
+      html += '<div style="margin-top:3px;color:#6b7280">默认: ' + esc(String(info.def)) + '</div>';
+    }
+    tip.innerHTML = html;
+    tip.style.display = 'block';
+    var tw = tip.offsetWidth, th = tip.offsetHeight;
+    var nx = x + 14, ny = y + 14;
+    if (nx + tw > window.innerWidth - 8) nx = x - tw - 14;
+    if (ny + th > window.innerHeight - 8) ny = y - th - 14;
+    tip.style.left = nx + 'px'; tip.style.top = ny + 'px';
+    tip.style.opacity = '1';
+  }
+  function hideParamTip() {
+    if (_paramTip) { _paramTip.style.opacity = '0'; _paramTip.style.display = 'none'; }
+  }
+  function bindParamHoverTips() {
+    document.addEventListener('mouseover', function (e) {
+      var t = e.target;
+      var f = t.closest ? t.closest('.field') : null;
+      if (!f) { hideParamTip(); return; }
+      var info = paramTipOfField(f);
+      if (!info) { hideParamTip(); return; }
+      var label = f.querySelector('label');
+      var lt = label ? label.textContent.trim().replace(/^[^\u4e00-\u9fa5A-Za-z0-9]+/, '') : '';
+      showParamTip(e.clientX, e.clientY, info, lt);
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (_paramTip && _paramTip.style.display !== 'none') {
+        var tw = _paramTip.offsetWidth, th = _paramTip.offsetHeight;
+        var nx = e.clientX + 14, ny = e.clientY + 14;
+        if (nx + tw > window.innerWidth - 8) nx = e.clientX - tw - 14;
+        if (ny + th > window.innerHeight - 8) ny = e.clientY - th - 14;
+        _paramTip.style.left = nx + 'px'; _paramTip.style.top = ny + 'px';
+      }
+    });
+    document.addEventListener('mouseout', function (e) {
+      if (!e.relatedTarget || !(e.relatedTarget.closest && e.relatedTarget.closest('.field'))) {
+        hideParamTip();
+      }
     });
   }
+
   function openParamsHelp() {
     $('params-modal').hidden = false;
     if (paramDefs.length) { renderParamsHelp(); return; }
     $('params-body').innerHTML = '<div class="empty-hint">⏳ 加载中…</div>';
     loadParams().then(renderParamsHelp);
   }
+
   function renderParamsHelp() {
     const groups = {};
     paramDefs.forEach(function (p) { (groups[p.group] = groups[p.group] || []).push(p); });
@@ -906,8 +1024,7 @@
     $('params-body').innerHTML = html;
   }
 
-  // 场景预设：对话/代码/长文档/省显存/高速 一键填常用参数组合
-  // （按 RTX 3060 Ti 8GB + 16 核 CPU 设计；n_gpu_layers -1 = auto 自动卸载到显存可容纳）
+  // ── 场景预设 ──────────────────────────
   const SCENARIO_PRESETS = {
     chat: { n_gpu_layers: 0, ctx_size: 8192, batch_size: 2048, flash_attn: 'on', cache_type_k: 'f16', cache_type_v: 'f16' },
     code: { n_gpu_layers: 0, ctx_size: 16384, batch_size: 2048, flash_attn: 'on', cache_type_k: 'f16', cache_type_v: 'f16', temperature: 0.2, top_p: 0.9 },
@@ -915,6 +1032,7 @@
     vram: { n_gpu_layers: 8, ctx_size: 4096, batch_size: 1024, ubatch_size: 256, flash_attn: 'on', cache_type_k: 'q8_0', cache_type_v: 'q8_0', kv_unified: true },
     fast: { n_gpu_layers: -1, ctx_size: 4096, batch_size: 4096, ubatch_size: 1024, flash_attn: 'on', parallel: 1 }
   };
+
   function applyScenarioPreset(name) {
     const p = SCENARIO_PRESETS[name];
     if (!p) return;
@@ -926,13 +1044,10 @@
     });
     refreshPreview();
     if (typeof scheduleAudit === 'function') scheduleAudit();
-    // 注意：绝不能对 <select> 调 flashBtn —— textContent 赋值会清空所有 <option>，
-    // 导致下拉框无法再选择且缩成一条。改用临时高亮反馈。
     flashSelect($('scenario-preset'));
   }
 
-  // 主区域 Tab 切换：显示对应 data-mtab 的面板，隐藏其它
-  // （🏠概览 = 性能监控 / ⚙️模型配置 = 参数面板 / 🚀运行实例 = 实例卡片 / 📋控制台 = 日志）
+  // ── 主区域 Tab ──────────────────────────
   function switchMainTab(name) {
     document.querySelectorAll('#main-tabs .main-tab').forEach(function (b) {
       b.classList.toggle('active', b.dataset.mtab === name);
@@ -940,11 +1055,9 @@
     document.querySelectorAll('section.panel[data-mtab]').forEach(function (s) {
       s.classList.toggle('mtab-active', s.dataset.mtab === name);
     });
-    // 顶部工具栏面包屑同步
     const crumbMap = { overview: '📊 性能监控', setup: '⚙️ 模型配置', instances: '🚀 运行实例', console: '📋 控制台' };
     const crumb = $('topbar-crumb');
     if (crumb && crumbMap[name]) crumb.textContent = crumbMap[name];
-    // 切到概览时重绘图表 + 刷新内嵌实时监控（容器可能刚从隐藏变为可见，需 resize 避免 0 宽）
     if (name === 'overview') {
       try { if (PerfChart.resize) PerfChart.resize(); } catch (_) {}
       try { if (window.Monitor) Monitor.refresh(); } catch (_) {}
@@ -953,7 +1066,7 @@
     if (name === 'console' && typeof applyLogFilter === 'function') applyLogFilter();
   }
 
-  // ── 界面动态设置（主题/布局/紧凑，localStorage 持久化）────────
+  // ── UI 设置 ────────────────────────────
   const UI_KEY = 'lc-ui-settings';
   function loadUISettings() {
     let s = {};
@@ -967,12 +1080,10 @@
     const th = $('ui-theme'); if (th) th.value = s.theme || 'dark';
     const ly = $('ui-layout'); if (ly) ly.value = s.layout || 'tabs';
     const cp = $('ui-compact'); if (cp) cp.checked = !!s.compact;
-    // Tab 式模式下确保有激活面板
     if ((s.layout || 'tabs') === 'tabs') {
       const anyActive = document.querySelector('section.panel[data-mtab].mtab-active');
       if (!anyActive) switchMainTab('setup');
     }
-    // 双栏模式：确保图表重绘（容器从隐藏变可见）
     if (s.layout === 'dash' && window.PerfChart) {
       try { if (PerfChart.resize) PerfChart.resize(); } catch (_) {}
     }
@@ -988,7 +1099,8 @@
   }
 
   // ── 模型能力徽标 ──────────────────────
-  function tagBadges(tags) {    const m = { mtp: '🧩 MTP', moe: '🌐 MoE', vision: '📷 视觉', reasoning: '🧠 推理', embedding: '📐 嵌入' };
+  function tagBadges(tags) {
+    const m = { mtp: '🧩 MTP', moe: '🌐 MoE', vision: '📷 视觉', reasoning: '🧠 推理', embedding: '📐 嵌入' };
     const out = [];
     (tags || []).forEach(function (t) { if (m[t]) out.push(m[t]); });
     return out.join(' ');
@@ -1002,13 +1114,22 @@
      'cache_ram', 'ctx_checkpoints', 'checkpoint_min_step', 'kv_unified', 'threads_http',
      'metrics', 'props', 'slots', 'repeat_penalty', 'presence_penalty', 'frequency_penalty',
      'temperature', 'top_p', 'top_k', 'min_p', 'samplers', 'sampler_seq', 'seed', 'ignore_eos', 'load_mode', 'numa',
-     'host', 'port', 'api_key', 'agent'].forEach(function (k) {
+     'host', 'port', 'api_key', 'agent',
+     'alias', 'tags', 'timeout', 'sse_ping_interval',
+     'n_cpu_ffn', 'pooling', 'embd_normalize', 'kv_offload', 'op_offload', 'cont_batching', 'slot_prompt_similarity',
+     'kv_unified_per_slot', 'cache_reuse', 'cache_prompt', 'cache_idle_slots', 'keep', 'repack', 'no_host', 'slot_save_path',
+     'reasoning_preserve', 'reasoning_budget_message', 'skip_chat_parsing', 'prefill_assistant',
+     'dry_multiplier', 'dry_base', 'dry_allowed_length', 'dry_penalty_last_n', 'dry_sequence_breaker',
+     'xtc_probability', 'xtc_threshold', 'top_nsigma', 'typical', 'dynatemp_range', 'dynatemp_exp',
+     'mirostat', 'mirostat_lr', 'mirostat_ent', 'repeat_last_n', 'logit_bias', 'backend_sampling',
+     'hf_repo', 'hf_file', 'hf_token', 'model_url', 'lora', 'lora_scaled', 'lora_init_without_apply',
+     'control_vector', 'control_vector_scaled', 'control_vector_layer_range', 'override_tensor', 'override_kv',
+     'offline', 'no_mmproj', 'log_verbose',
+     ].forEach(function (k) {
       const el = $('p-' + k);
       if (!el) return;
       if (el.type === 'checkbox') { p[k] = el.checked; return; }
       const v = el.value.trim();
-      // mmproj_device: llama.cpp 显式传 --mmproj-device auto 会报 invalid device: auto，
-      // auto 是默认行为 → 值等于 auto 时视为未设置（不发送）
       if (v !== '' && !(k === 'mmproj_device' && v === 'auto')) {
         p[k] = /^-?\d+(\.\d+)?$/.test(v) ? (v.indexOf('.') >= 0 ? parseFloat(v) : parseInt(v, 10)) : v;
       }
@@ -1018,41 +1139,32 @@
       const v = $('p-n_cpu_moe').value.trim();
       if (v !== '') p.n_cpu_moe = parseInt(v, 10);
     }
-    // 🧩 投机解码（组始终显示）：
-    //   MTP 模型勾选 = draft-mtp（用主模型自带 MTP 头投机）
-    //   普通模型勾选 + 填独立草稿模型 = draft-simple + model_draft（外部草稿投机）
-    //   普通模型勾选但未填草稿模型 = 不发送（无草稿则投机无效）
-    //   MTP 模型取消勾选 = none（显式关闭，覆盖后端 MTP 自动兜底）
-    const mtp = $('p-spec_type');
-    if (mtp && mtp.checked) {
+    // 🧩 投机解码：开关 + 自动识别草稿格式类型
+    const specCb = $('p-spec_type');
+    if (specCb && specCb.checked) {
       const isMtpModel = !!window.__isMtp;
       const mdEl = $('p-model_draft');
       const draftPath = mdEl ? mdEl.value.trim() : '';
-      if (isMtpModel) {
-        p.spec_type = 'draft-mtp'; // 用主模型自带 MTP 头，无需外部草稿
-      } else if (draftPath) {
-        p.spec_type = 'draft-simple';
-        p.model_draft = draftPath; // 外部草稿模型投机必须带草稿路径
-      } else {
-        return p; // 普通模型未填草稿模型 → 投机无效，不发送
+      const type = detectDraftType(draftPath, isMtpModel);
+      if (!type) return p; // 非 MTP 且无草稿 → 不启用投机
+      p.spec_type = type;
+      if (type !== 'draft-mtp') {
+        p.model_draft = draftPath;
+        ['n_gpu_layers_draft', 'spec_draft_threads', 'spec_draft_threads_batch', 'spec_draft_n_max', 'spec_draft_n_min',
+         'spec_draft_p_split', 'spec_draft_p_min', 'spec_draft_cache_type_k', 'spec_draft_cache_type_v',
+         'spec_synth_len', 'spec_synth_rates'].forEach(function (k) {
+          const el = $('p-' + k);
+          if (!el) return;
+          const v = el.value.trim();
+          if (v !== '') p[k] = /^-?\d+(\.\d+)?$/.test(v) ? (v.indexOf('.') >= 0 ? parseFloat(v) : parseInt(v, 10)) : v;
+        });
       }
-      ['n_gpu_layers_draft', 'spec_draft_threads', 'spec_draft_n_max', 'spec_draft_n_min',
-       'spec_draft_p_split', 'spec_draft_p_min'].forEach(function (k) {
-        const el = $('p-' + k);
-        if (!el) return;
-        const v = el.value.trim();
-        if (v !== '') p[k] = /^-?\d+(\.\d+)?$/.test(v) ? (v.indexOf('.') >= 0 ? parseFloat(v) : parseInt(v, 10)) : v;
-      });
-    } else if (mtp && window.__isMtp && !mtp.checked) {
-      p.spec_type = 'none';
     }
     return p;
   }
 
   function refreshPreview() {
     const params = collectParams();
-    // Use the real model file path (not the bundle id) in the preview, and pass
-    // bundle_id so the server also reflects auto-attached mmproj / --mcp flags.
     const b = bundles.find(x => x.id === selectedId);
     params.model = b && b.base_model ? b.base_model.path : '';
     api(API.preview, { method: 'POST', body: JSON.stringify({ bundle_id: selectedId, params: params }) })
@@ -1072,7 +1184,6 @@
       .catch(function (e) { alert('启动失败: ' + e.message); });
   }
 
-  // 停止当前选中的模型所在实例（若多个，则停止全部）
   function onStop() {
     getRunning().then(function (running) {
       if (!running.length) { alert('没有运行中的实例'); return; }
@@ -1091,7 +1202,6 @@
     });
   }
 
-  // 重启当前选中模型的实例（无选中时重启第一个运行实例）
   function onRestart() {
     getRunning().then(function (running) {
       if (!running.length) { alert('没有运行中的实例'); return; }
@@ -1135,7 +1245,6 @@
     }).catch(function () {});
   }
 
-  // 会话过滤下拉框（日志控制台按实例查看）
   function renderSessionFilter(list) {
     const sel = $('log-session');
     const current = sel.value;
@@ -1164,8 +1273,6 @@
       box.innerHTML = '<div class="empty-hint">暂无运行实例。请在下方选择模型并点击 ▶ 启动。</div>';
       return;
     }
-    // 拉取实时健康状态（哪些实例的 /metrics 已有数据 → API 在线），
-    // 不依赖前端跨域，直接用后端 /api/monitor 的存活数据。
     api('/api/monitor').then(function (r) {
       const healthy = {};
       (r.instances || []).forEach(function (it) {
@@ -1178,7 +1285,6 @@
     });
   }
 
-  // 从实例命令行解析注入的 API Key（--api-key xxx）
   function sessionAPIKey(s) {
     const args = s.cmdline_args || [];
     for (let i = 0; i < args.length; i++) {
@@ -1195,7 +1301,6 @@
       div.className = 'instance-card';
       const baseUrl = 'http://127.0.0.1:' + s.port;
       const apiKey = sessionAPIKey(s);
-      // 连接状态：crashed → 离线红点；running 且 /metrics 有数据 → 在线绿点；否则 → 连接中黄点
       let dotCls, dotTitle;
       if (s.status === 'crashed') { dotCls = 'off'; dotTitle = '实例已退出，API 不可用'; }
       else if (healthy[s.id]) { dotCls = 'ok'; dotTitle = 'API 在线，外部程序可正常对接'; }
@@ -1246,7 +1351,6 @@
     updateUptimes();
   }
 
-  // 每秒刷新实例卡片的运行时长（崩溃/停止的实例停止计时）
   function updateUptimes() {
     document.querySelectorAll('[data-uptime]').forEach(function (el) {
       const start = Date.parse(el.dataset.start);
@@ -1266,7 +1370,6 @@
     return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
   }
 
-  // 向日志控制台写入一行（复用 LogConsole）
   function appendLog(level, line) {
     if (window.LogConsole) window.LogConsole.append({ ts: new Date().toLocaleTimeString('zh-CN', { hour12: false }), level: level, line: line });
   }
@@ -1275,7 +1378,7 @@
     return s === 'running' ? '●' : s === 'crashed' ? '✖' : '○';
   }
 
-  // ── 配置健康审计（后端真实计算）────────
+  // ── 配置健康审计 ──────────────────────
   function runAudit() {
     const box = $('audit-box');
     if (!selectedId) {
@@ -1289,17 +1392,18 @@
           const cls = it.level === 'error' ? 'error' : it.level === 'warn' ? 'warn' : 'info';
           return `<div class="audit-item ${cls}">${icon} ${esc(it.message)}</div>`;
         });
-        // VRAM 估算行（审计未覆盖时的补充信息）
         const rec = r.recommendation;
         if (rec && rec.estimated_vram_gb > 0) {
           items.unshift(`<div class="audit-item info">📊 当前配置估算显存占用 ${rec.estimated_vram_gb.toFixed(1)} GB</div>`);
         }
+        // 移除旧的 banner，再插入
+        const oldBanner = box.querySelector('.apply-banner');
+        if (oldBanner) oldBanner.remove();
         box.innerHTML = items.join('') || '<div class="audit-item info">✅ 未发现明显问题</div>';
       })
       .catch(function () { box.innerHTML = '<div class="empty-hint">审计不可用。</div>'; });
   }
 
-  // ── 手动添加模型 ──────────────────────
   // ── 扫描文件夹 ────────────────────────
   let scanCandidates = [];
 
@@ -1379,7 +1483,6 @@
     if (!selected.length) return;
     const btn = $('scan-import');
     btn.disabled = true; btn.textContent = '⏳ 导入中…';
-    // 逐个导入并区分：成功 / 已存在（跳过）/ 失败，避免一个重复项中断整批。
     let ok = 0, dup = 0, failed = 0;
     const jobs = selected.map(function (c) {
       return api(API.import, { method: 'POST', body: JSON.stringify({ path: c.bundle.base_model.path, name: c.bundle.name }) })
@@ -1454,18 +1557,16 @@
     api(API.hfDownload, { method: 'POST', body: JSON.stringify({ repo: repo, filename: filename }) })
       .then(function (r) {
         window.HFProgress.update({ job_id: r.job_id, filename: r.filename, done: 0, total: 0 });
-        // 每 5 秒刷新模型库，直到新模型出现
         let tries = 0;
         const timer = setInterval(function () {
           tries++;
           refreshBundles();
-          if (tries >= 120) clearInterval(timer); // 最多等 10 分钟
+          if (tries >= 120) clearInterval(timer);
         }, 5000);
       })
       .catch(function (e) { st.textContent = '下载启动失败: ' + e.message; });
   }
 
-  // ── 下载进度条（由 WS progress 事件驱动）──
   window.HFProgress = (function () {
     const tasks = {};
     function ensure(jobId, filename) {
@@ -1558,12 +1659,9 @@
   }
 
   // ── 📡 实时监控 ──────────────────────
-  // 数据来自每个实例的全局 /metrics（llama-server 统计该实例所有请求，含外部
-  // API Key 调用）。后端每 5s 通过 WS 推送，打开弹窗时先 GET /api/monitor 拿快照。
-  // 每实例卡片附带实时趋势图（ECharts，离线自动降级为纯数字）。
   const MonChart = {
-    charts: {}, // "sid@container" -> echarts instance（支持弹窗 + 概览内嵌多容器）
-    series: {}, // sid -> { pps:[], rps:[], pred:[] }  历史采样（保留 120 点 ≈ 10 分钟）
+    charts: {},
+    series: {},
     option: function () {
       return {
         backgroundColor: 'transparent',
@@ -1594,7 +1692,6 @@
     replay: function (sid) {
       const s = this.series[sid];
       if (!s) return;
-      // 回放到该 sid 的所有容器图表
       const prefix = sid + '@';
       for (const key in this.charts) {
         if (key.indexOf(prefix) !== 0) continue;
@@ -1621,13 +1718,11 @@
       return t.toLocaleTimeString('zh-CN', { hour12: false });
     },
     resetCharts: function () {
-      // 弹窗刷新会重建 DOM → 释放旧图表实例，保留历史 series 供回放
       for (const key in this.charts) { this.charts[key].dispose(); }
       this.charts = {};
     }
   };
 
-  // 监控目标容器：弹窗(#monitor-body) + 概览页(#monitor-inline) 共用一套数据
   const Monitor = {
     containers: ['monitor-body', 'monitor-inline'],
     active: function () { return this.containers.filter(function (c) { return document.getElementById(c); }); },
@@ -1650,7 +1745,6 @@
           body.innerHTML = html;
         });
         data.forEach(function (it) {
-          // 每个容器独立建图（仅当容器可见，避免 0 宽）
           list.forEach(function (cid) {
             const visible = !!document.getElementById(cid).offsetParent;
             const el = document.querySelector('#' + cid + ' .monitor-card[data-session="' + it.session_id + '"] .monitor-chart');
@@ -1701,7 +1795,7 @@
       const cards = this.active().map(function (cid) {
         return document.querySelector('#' + cid + ' .monitor-card[data-session="' + sid + '"]');
       }).filter(Boolean);
-      if (!cards.length) { this.refresh(); return; } // 新实例 → 重建卡片
+      if (!cards.length) { this.refresh(); return; }
       cards.forEach(function (card) {
         const set = function (role, txt) {
           const e = card.querySelector('[data-role="' + role + '"]');
@@ -1714,9 +1808,8 @@
         if (typeof m.slots_processing === 'number') set('slots', m.slots_processing.toLocaleString());
         if (typeof m.kv_cache_usage_ratio === 'number') set('kv', (m.kv_cache_usage_ratio * 100).toFixed(0) + '%');
       });
-      MonChart.push(sid, m); // 追加历史采样点并刷新所有容器趋势图
+      MonChart.push(sid, m);
     },
-    // ── 请求历史 ──────────────────────
     updateRequests: function (sid, req) {
       if (!req) return;
       window.__reqHistory = window.__reqHistory || {};
@@ -1740,7 +1833,6 @@
         if (box) box.innerHTML = list.slice(0, 10).map(reqRow).join('');
       });
     },
-    // ── 大图 / 详情弹窗 ────────────────
     openBig: function (sid) {
       const card = document.querySelector('#monitor-body .monitor-card[data-session="' + sid + '"]') ||
         document.querySelector('#monitor-inline .monitor-card[data-session="' + sid + '"]');
@@ -1772,7 +1864,6 @@
       box.insertAdjacentHTML('afterbegin', reqRow(req));
       while (box.children.length > 50) box.lastChild.remove();
     },
-    // ── 导出 CSV ──────────────────────
     export: function () {
       const rows = [['实例', '时间', '输入tok', '输出tok', '输入速率', '输出速率', '并发槽位', 'KV%']];
       const mets = window.__liveMetrics || {};
@@ -1812,7 +1903,6 @@
   };
   window.Monitor = Monitor;
 
-  // 全局辅助：打开指定会话的 Web 界面（供日志控制台等调用）
   window.openInstanceUI = function (sessionId) {
     getRunning().then(function (running) {
       if (!running.length) { alert('没有运行中的实例'); return; }
@@ -1822,7 +1912,6 @@
     });
   };
 
-  // 请求记录单行渲染
   function reqRow(req) {
     const draft = req.draft_total ? ' · 🎯 ' + req.draft_accepted + '/' + req.draft_total : '';
     return '<div class="req-row"><span class="req-time">' + (req.time || '--') + '</span>' +
@@ -1867,7 +1956,7 @@
 
   function renderMsgSample() {
     const box = $('dbg-messages');
-    if (box.children.length) return; // 保留用户已编辑的消息
+    if (box.children.length) return;
     const sys = addMsgRow();
     sys.querySelector('.msg-role').value = 'system';
     sys.querySelector('.msg-content').value = '你是一个乐于助人的本地 AI 助手。';
@@ -1934,7 +2023,6 @@
         body: { model: 'local', prompt: prompt, stream: true, temperature: parseFloat($('dbg-c-temperature').value) || 0.8 }
       };
     }
-    // embeddings
     const input = $('dbg-emb-input').value.trim();
     if (!input) { alert('请输入内容'); return null; }
     return { path: '/v1/embeddings', body: { model: 'local', input: input } };
@@ -1961,8 +2049,6 @@
     let timing = null;
     dbgAbort = new AbortController();
 
-    // Agent 工具循环：走 launcher 后端 /api/agent/chat，模型可调用 web_search 等
-    // 工具，后端自动执行并回传真实结果，直到模型给出最终文本。
     if (tpl === 'chat') {
       fetch('/api/agent/chat', {
         method: 'POST',
@@ -2077,7 +2163,6 @@
       div.querySelector('[data-replay]').addEventListener('click', function () {
         const t = h.tpl;
         switchDebugTab(t);
-        // 填入表单
         if (t === 'chat' && h.req.body && h.req.body.messages) {
           $('dbg-messages').innerHTML = '';
           h.req.body.messages.forEach(function (m) {
@@ -2123,13 +2208,11 @@
       grid: { left: 50, right: 16, top: 24, bottom: 28 },
       textStyle: { color: '#8b96a8' }
     };
-    // Token by model
     renderChart('chart-tokens', Object.assign({}, base, {
       xAxis: { type: 'category', data: d.models.map(m => shortName(m.name)), axisLabel: { rotate: 30, fontSize: 10 } },
       yAxis: { type: 'value' },
       series: [{ type: 'bar', data: d.models.map(m => m.tokens), itemStyle: { color: '#4f8cff' } }]
     }));
-    // Tokens by day
     renderChart('chart-days', Object.assign({}, base, {
       xAxis: { type: 'category', data: d.days.map(x => x.date.slice(5)) },
       yAxis: { type: 'value' },
@@ -2138,7 +2221,6 @@
         lineStyle: { color: '#7c3aed', width: 2 }, areaStyle: { color: 'rgba(124,58,237,.12)' }
       }]
     }));
-    // Model heat (sessions)
     const sorted = d.models.slice().sort((a, b) => b.sessions - a.sessions);
     renderChart('chart-heat', Object.assign({}, base, {
       grid: { left: 120, right: 16, top: 16, bottom: 24 },
@@ -2146,7 +2228,6 @@
       yAxis: { type: 'category', data: sorted.map(m => shortName(m.name)) },
       series: [{ type: 'bar', data: sorted.map(m => m.sessions), itemStyle: { color: '#d29922' } }]
     }));
-    // Avg TPS by model
     renderChart('chart-tps', Object.assign({}, base, {
       xAxis: { type: 'category', data: d.models.map(m => shortName(m.name)), axisLabel: { rotate: 30, fontSize: 10 } },
       yAxis: { type: 'value', name: 'tok/s' },
@@ -2166,7 +2247,7 @@
     return s.length > 16 ? s.slice(0, 15) + '…' : s;
   }
 
-  // ── MCP 服务器管理（注册 / 模板库 / 环境检测 / 健康状态）────────
+  // ── MCP 服务器管理 ────────────────────
   function openMCPModal() {
     $('mcp-modal').hidden = false;
     loadMCP();
@@ -2177,7 +2258,6 @@
   function loadMCP() {
     const box = $('mcp-list');
     box.innerHTML = '<div class="empty-hint">加载中…</div>';
-    // 并行拉取服务器列表 + 健康状态（命令是否在 PATH 上）
     api(API.mcpStatus).catch(function () { return []; }).then(function (statusList) {
       const byId = {};
       (statusList || []).forEach(function (st) { byId[st.id] = st; });
@@ -2196,7 +2276,6 @@
     box.innerHTML = '';
     list.forEach(function (s) {
       const st = byId[s.id] || {};
-      // 环境变量缺失检查（如 BRAVE_API_KEY 为空 → 工具能注册但调用必然失败）
       const missingEnv = Object.keys(s.env || {}).filter(function (k) { return (s.env[k] || '').trim() === ''; });
       const dot = s.enabled
         ? (st.healthy === false ? '<span class="mcp-dot bad" title="命令不在 PATH，可能无法启动"></span>' : '<span class="mcp-dot ok" title="命令可执行"></span>')
@@ -2231,7 +2310,6 @@
     });
   }
 
-  // 🧪 测试 MCP 服务（真实 stdio 握手 initialize + tools/list，非仅启动）
   function testMCP(s, resEl) {
     if (!resEl) return;
     resEl.textContent = '⏳ 测试中…';
@@ -2249,7 +2327,6 @@
       .catch(function (e) { resEl.textContent = '❌ ' + e.message; resEl.className = 'mcp-test-result err'; });
   }
 
-  // 🔗 把此 MCP 服务器绑定到哪些模型（多选面板，勾选保存）
   function bindMCPServer(s, row) {
     let old = row.querySelector('.mcp-bind');
     if (old) { old.remove(); return; }
@@ -2284,7 +2361,6 @@
         panel.remove();
         flashBtn(row.querySelector('[data-bind]'), '✓ 已保存 ' + changed + ' 个');
         if (changed > 0) {
-          // 刷新模型库/配置面板以更新 🧩 MCP 徽标
           refreshBundles();
         }
       }).catch(function (e) { alert('保存失败: ' + e.message); });
@@ -2306,9 +2382,7 @@
       .catch(function (e) { alert('注册失败: ' + e.message); });
   }
 
-  // ── 模板库 ─────────────────────────────
   function loadMCPTemplates() {
-    // 并行拉取模板 + 已注册服务器（用于标记"已使用"的模板）
     Promise.all([
       api(API.mcpTemplates).catch(function () { return []; }),
       api(API.mcpList).catch(function () { return []; })
@@ -2321,14 +2395,12 @@
     const container = $('mcp-template-list');
     if (!container) return;
     if (!templates.length) { container.innerHTML = '<div class="empty-hint">暂无模板。</div>'; return; }
-    // 已注册的服务器名集合（判断模板是否已添加使用）
     const usedSet = {};
     (registered || []).forEach(function (s) { usedSet[s.name] = true; });
     const isUsed = function (tplId) {
       return !!(usedSet[tplId] || Object.keys(usedSet).some(function (n) { return n.indexOf(tplId + '-') === 0; }));
     };
     container.innerHTML = '';
-    // 按分类分组展示，推荐排前
     const groups = {};
     templates.forEach(function (t) {
       (groups[t.category || '其他'] = groups[t.category || '其他'] || []).push(t);
@@ -2358,7 +2430,6 @@
     });
   }
 
-  // 从模板添加：内联配置表单（VS Code 内嵌浏览器不支持 window.prompt，用页面内控件）
   function onAddTemplate(tpl, card) {
     let old = card.querySelector('.tpl-config');
     if (old) { old.remove(); return; }
@@ -2400,7 +2471,6 @@
         env: env,
         enabled: true
       };
-      // 内置子命令模板用 {launcher} 占位符 → 替换为 llama-launcher.exe 绝对路径
       if (server.command.indexOf('{launcher}') >= 0 || server.args.some(function (a) { return a.indexOf('{launcher}') >= 0; })) {
         api(API.system).then(function (r) {
           const lp = (r.launcher_path || '').replace(/\\/g, '/');
@@ -2422,7 +2492,6 @@
       .catch(function (e) { alert('添加失败: ' + e.message); });
   }
 
-  // 环境检测提示
   function checkMCPEnv() {
     api(API.mcpCheckEnv).catch(function () { return {}; }).then(function (env) {
       const hint = $('mcp-env-hint');
@@ -2463,7 +2532,7 @@
         log_retention_days: parseInt($('set-retention').value, 10) || 30,
         hf_endpoint: $('set-hf').value.trim(),
         cache_dir: $('set-cache-dir').value.trim(),
-        server_api_key: '__KEEP__' // 全局 API Key 由「🔑 全局 API」板块管理，这里不覆盖
+        server_api_key: '__KEEP__'
       })
     }).then(function () {
       $('settings-modal').hidden = true;
@@ -2480,7 +2549,7 @@
     loadAPIKeyState();
     renderAPIKeyMonitor();
     if (akTimer) clearInterval(akTimer);
-    akTimer = setInterval(akTick, 5000); // 实时刷新：系统资源 + 实例指标
+    akTimer = setInterval(akTick, 5000);
   }
 
   function closeAPIKeyModal() {
@@ -2489,7 +2558,6 @@
     MonChart.resetCharts();
   }
 
-  // 加载 API Key 配置状态（已保存/未配置）
   function loadAPIKeyState() {
     api(API.configGet).then(function (c) {
       cfgHasAPIKey = !!c.has_api_key;
@@ -2499,7 +2567,6 @@
       $('ak-key-hint').textContent = cfgHasAPIKey
         ? '🔒 已保存加密 Key · 点 👁 查看明文（不点不会加载明文）'
         : '未配置全局 Key。可手动粘贴，或点 🎲 生成一个 256 位随机 Key 后 💾 保存。';
-      // 搜索 API Key 状态（不加载明文，只显示占位提示）
       $('ak-brave-key').value = '';
       $('ak-brave-key').placeholder = c.has_brave_key ? '••••••••（已保存，输入新值可替换）' : '可选，X-Subscription-Token（search.brave.com 免费申请）';
       $('ak-tavily-key').value = '';
@@ -2515,7 +2582,6 @@
     });
   }
 
-  // 显示/隐藏 API Key（已保存但未回显时点击拉取明文）
   function akToggleVisibility() {
     const input = $('ak-api-key');
     const btn = $('ak-key-toggle');
@@ -2531,12 +2597,11 @@
     else { input.type = 'password'; btn.textContent = '👁'; }
   }
 
-  // 保存全局 API Key（带上完整现有配置，避免其他字段被清空）
   function saveAPIKey() {
     const keyVal = $('ak-api-key').value;
     let serverApiKey = '__KEEP__';
-    if (akAPIKeyChanged && keyVal === '') serverApiKey = '';        // 用户清空 → 清除
-    else if (akAPIKeyChanged && keyVal !== '') serverApiKey = keyVal; // 新值 → 加密存储
+    if (akAPIKeyChanged && keyVal === '') serverApiKey = '';
+    else if (akAPIKeyChanged && keyVal !== '') serverApiKey = keyVal;
     api(API.configGet).then(function (c) {
       return api(API.configPut, {
         method: 'PUT',
@@ -2551,7 +2616,7 @@
     }).then(function () {
       flashBtn($('ak-key-save'), '✓ 已保存');
       loadAPIKeyState();
-      autoFillGlobalKey(); // 主面板自动填入新的全局 Key
+      autoFillGlobalKey();
     }).catch(function (e) { alert('保存失败: ' + e.message); });
   }
 
@@ -2589,7 +2654,6 @@
     else { input.type = 'password'; btn.textContent = '👁'; }
   }
 
-  // 保存搜索 API Key（带上完整现有配置）
   function saveSearchKeys() {
     const braveVal = $('ak-brave-key').value;
     const tavilyVal = $('ak-tavily-key').value;
@@ -2619,7 +2683,6 @@
     }).catch(function (e) { alert('保存失败: ' + e.message); });
   }
 
-  // 系统资源（实时，来自 /api/system 每次实时探测）
   function loadSysResource() {
     api(API.system).then(function (r) {
       renderSysResource(r.hardware || {});
@@ -2655,7 +2718,6 @@
     el.innerHTML = html;
   }
 
-  // 全局统计（汇总所有运行实例的 /metrics）
   function renderGlobalStats(instances) {
     const el = $('ak-stats');
     if (!el) return;
@@ -2675,7 +2737,6 @@
       <div class="ak-stat"><span class="ak-stat-v">${instances.length}</span><span class="ak-stat-l">运行实例</span></div>`;
   }
 
-  // 实例实时监控：首次/手动刷新时重建卡片（复用 Monitor 卡片）
   function renderAPIKeyMonitor() {
     const body = $('apikey-monitor');
     if (!body) return;
@@ -2707,7 +2768,6 @@
     });
   }
 
-  // 更新单张实例卡片数字 + 趋势（不重建 DOM）
   function akUpdateCard(sid, m) {
     const card = document.querySelector('#apikey-monitor .monitor-card[data-session="' + sid + '"]');
     if (!card) return;
@@ -2729,13 +2789,11 @@
     if (box) box.innerHTML = list.slice(0, 10).map(reqRow).join('');
   }
 
-  // 5 秒定时刷新：系统资源 + 全局统计 + 卡片数字（不重建图表）
   function akTick() {
     loadSysResource();
     api('/api/monitor').then(function (r) {
       const data = r.instances || [];
       renderGlobalStats(data);
-      // 数据已就绪但卡片区还是空（初次打开时 /api/monitor 可能尚未就绪）→ 重建卡片
       const body = $('apikey-monitor');
       const needRebuild = body && data.length && !body.querySelector('.monitor-card');
       if (needRebuild) { renderAPIKeyMonitor(); return; }
@@ -2747,8 +2805,8 @@
   }
 
   // ── 文件/目录浏览器 ───────────────────
-  let fsMode = 'dir';       // 目录选择模式
-  let fsTargetId = 'scan-dir'; // 选中目录填入的目标输入框 id
+  let fsMode = 'dir';
+  let fsTargetId = 'scan-dir';
   let fsCurrent = { path: '', parent: '', is_root: true };
 
   function openFSBrowser(mode, targetId) {
@@ -2777,7 +2835,6 @@
     const box = $('fs-list');
     box.innerHTML = '';
     $('fs-up').disabled = !res.parent;
-    // 选择目录按钮仅在 dir 模式且当前非根目录时显示
     $('fs-select').hidden = !(fsMode === 'dir' && !res.is_root);
 
     if (res.is_root) {
@@ -2817,13 +2874,11 @@
     return d;
   }
 
-  // dir 模式：选择当前目录 → 填入目标输入框
   function selectFSDir() {
     const target = document.getElementById(fsTargetId);
     if (target) {
       let p = fsCurrent.path || '';
       if (fsTargetId === 'set-cache-dir') {
-        // 自动在所选目录下追加一个命名的缓存子目录，避免缓存直接堆在目录根
         p = p.replace(/[\\/]+$/, '') + '\\llama-cache';
       }
       target.value = p;
@@ -2851,9 +2906,13 @@
     $('savecfg-row').hidden = true;
     $('test-result').innerHTML = '';
     $('test-summary').textContent = '';
+    resetTestProgress();
     $('test-start').disabled = false;
     $('test-cancel').hidden = true;
     $('test-export').hidden = true;
+    if ($('test-savesnap')) $('test-savesnap').hidden = true;
+    if ($('btn-snap-rename')) $('btn-snap-rename').hidden = true;
+    if ($('btn-savecfg-rename')) $('btn-savecfg-rename').hidden = true;
     testJobId = null;
     sweepJobId = null;
     if (window.__testChart) { window.__testChart.dispose(); window.__testChart = null; }
@@ -2876,7 +2935,6 @@
     updateTestModelCount();
   }
 
-  // 一键全选 / 一键取消选择
   function selectAllTestModels() {
     document.querySelectorAll('#test-models .tm').forEach(function (c) { c.checked = true; });
     updateTestModelCount();
@@ -2894,6 +2952,25 @@
     if (el) el.textContent = `已选 ${sel}/${total} 个模型`;
   }
 
+  // ★ 测试/扫描进度条
+  function setTestProgress(done, total, label) {
+    const wrap = $('test-progress');
+    if (!wrap) return;
+    const pct = total > 0 ? Math.max(0, Math.min(100, Math.round(done / total * 100))) : 0;
+    const fill = $('test-progress-fill');
+    const lab = $('test-progress-label');
+    if (fill) fill.style.width = pct + '%';
+    if (lab) lab.textContent = label || (pct + '%');
+    wrap.hidden = false;
+  }
+  function resetTestProgress() {
+    const wrap = $('test-progress');
+    if (!wrap) return;
+    wrap.hidden = true;
+    const fill = $('test-progress-fill');
+    if (fill) fill.style.width = '0%';
+  }
+
   function startTest() {
     if (testRunning) return;
     const ids = [...document.querySelectorAll('#test-models .tm:checked')].map(function (c) { return c.dataset.id; });
@@ -2905,6 +2982,8 @@
     $('test-start').disabled = true;
     $('test-start').textContent = '⏳ 测试中…';
     $('test-summary').textContent = '共 ' + ids.length + ' 个模型，正在逐个测试…';
+    resetTestProgress();
+    setTestProgress(0, ids.length, '0 / ' + ids.length);
     const tp = {};
     ['ctx_size', 'n_gpu_layers', 'threads', 'batch_size', 'temperature'].forEach(function (k) {
       const el = $('tp-' + k);
@@ -2927,9 +3006,7 @@
     }).catch(function (e) { alert('测试启动失败: ' + e.message); testRunning = false; });
   }
 
-  // 由 ws.js 推送 test_progress / test_done 事件驱动
   function updateTestItem(msg) {
-    // 6 阶段状态机事件（无 status 字段 = 纯阶段广播）
     if (msg.stage && msg.status === undefined) { setStage(msg.stage); return; }
     const it = testItems.find(function (i) { return i.bundle_id === msg.bundle_id; });
     if (it) {
@@ -2948,22 +3025,26 @@
       hideStage();
       $('test-cancel').hidden = true;
       $('test-export').hidden = (msg.results || []).length === 0;
+      if ($('test-savesnap')) $('test-savesnap').hidden = (msg.results || []).length === 0;
+      if ($('btn-snap-rename')) $('btn-snap-rename').hidden = (msg.results || []).length === 0;
       const ok = (msg.results || []).filter(function (r) { return r.status === 'ok'; }).length;
       $('test-summary').textContent = msg.cancelled
         ? '⏹ 已取消测试（完成 ' + (msg.results || []).length + ' 个模型）'
         : '🏁 测试完成：✅ 通过 ' + ok + ' / ' + msg.results.length;
+      setTestProgress(msg.results.length, msg.results.length, '完成');
       $('test-start').disabled = false;
       $('test-start').textContent = '▶ 再次测试';
     } else {
       const ok = testItems.filter(function (i) { return i.status === 'ok'; }).length;
       const fail = testItems.filter(function (i) { return i.status === 'fail'; }).length;
+      const done = ok + fail;
       $('test-summary').textContent = '⏳ 测试中… 通过 ' + ok + ' / 失败 ' + fail + ' / 共 ' + testItems.length;
+      setTestProgress(done, testItems.length, done + ' / ' + testItems.length);
     }
   }
 
   function renderTestResult() {
     const box = $('test-result');
-    // 结果自动排序：已通过(ok)按 TPS 降序在前，失败/排队中在后
     const sorted = testItems.slice().sort(function (a, b) {
       const ao = a.status === 'ok' ? 1 : 0, bo = b.status === 'ok' ? 1 : 0;
       if (ao !== bo) return bo - ao;
@@ -2988,7 +3069,7 @@
     }).join('') || '<div class="empty-hint">尚未开始测试。</div>';
   }
 
-  // ── 参数扫描（单模型 × 多参数组合）────────────────
+  // ── 参数扫描 ──────────────────────────
   const SWEEP_PARAMS = [
     { key: 'n_gpu_layers', label: 'GPU 层数', type: 'int', hint: '0=纯CPU；总层数=全部上GPU', def: '0, 16, 33', ph: '如 0, 16, 33',
       presets: [['-1,0,8,16,24,32,33,40,99', '全覆盖'], ['0,16,33', '小→中→全量'], ['0,33', '纯CPU vs 全量'], ['16,32,33', '逐档上量'], ['0', '仅纯CPU'], ['33', '仅全量上GPU']] },
@@ -3057,12 +3138,13 @@
     { key: 'ignore_eos', label: '忽略 EOS', type: 'bool', hint: '不因结束符停止', def: '', ph: 'on / off',
       presets: [['on,off', '开 vs 关'], ['on', '开启'], ['off', '关闭']] }
   ];
-  let sweepMode = 'exhaustive'; // exhaustive | greedy
+
+  let sweepMode = 'exhaustive';
   let sweepItems = [];
   let sweepRunning = false;
   let sweepBest = -1;
   let sweepJobId = null;
-  let lastBest = null; // {modelId, params, meta} 最近一次测试的最优配置
+  let lastBest = null;
 
   function switchTestTab(name) {
     document.querySelectorAll('#test-tabs .tab').forEach(function (t) {
@@ -3074,6 +3156,7 @@
     $('tab-history').hidden = name !== 'history';
     const isSweep = name === 'sweep';
     $('test-summary').textContent = '';
+    resetTestProgress();
     $('savecfg-row').hidden = true;
     $('test-savecfg').hidden = !lastBest;
     $('test-start').disabled = false;
@@ -3111,9 +3194,183 @@
     return sb ? Number(((sb.base_model || {}).metadata || {}).context_length || 0) : 0;
   }
 
+  // ★ 为没有预设的参数自动生成 ▾ 预设下拉（int/float/enum，基于 registry 枚举值/默认值/档位）
+  // ★ 精选推荐预设（基于 llama.cpp 官方推荐值/常见档位；value,label）—— label 标注用途，一眼看懂
+  var PARAM_PRESETS = {
+    // ⚡ 性能
+    parallel: [['-1', '自动（推荐）'], ['1', '1 单槽位'], ['2', '2 双槽位（2 并发）'], ['4', '4 四槽位'], ['8', '8 八槽位']],
+    n_cpu_ffn: [['0', '0 全 GPU（推荐）'], ['8', '8 层留 CPU'], ['16', '16 层留 CPU'], ['32', '32 层留 CPU']],
+    slot_prompt_similarity: [['0.10', '0.10 默认'], ['0.30', '0.30 更省显存'], ['0.50', '0.50 激进复用']],
+    rope_scale: [['1.0', '1.0 原长（推荐）'], ['1.5', '1.5 中扩长'], ['2.0', '2.0 大幅扩长']],
+    image_min_tokens: [['0', '0 默认'], ['256', '256'], ['512', '512']],
+    image_max_tokens: [['0', '0 默认'], ['1024', '1024'], ['2048', '2048']],
+    mtmd_batch_max_tokens: [['512', '512 省显存'], ['1024', '1024 默认'], ['2048', '2048 快但费显存']],
+    embd_normalize: [['-1', '-1 不归一化'], ['0', '0 最大绝对值'], ['2', '2 欧氏（推荐）']],
+    // 🎨 采样
+    temperature: [['0.2', '0.2 精确（代码/翻译）'], ['0.4', '0.4 严谨'], ['0.6', '0.6 均衡'], ['0.8', '0.8 默认'], ['1.0', '1.0 创意']],
+    top_p: [['0.90', '0.90 保守'], ['0.95', '0.95 默认'], ['1.00', '1.00 关闭采样限制']],
+    top_k: [['20', '20 保守'], ['40', '40 默认'], ['60', '60 更随机'], ['100', '100 放开']],
+    min_p: [['0.05', '0.05 默认'], ['0.10', '0.10 更严格'], ['0.20', '0.20 严格过滤']],
+    repeat_penalty: [['1.00', '1.0 关闭'], ['1.10', '1.1 温和防复读'], ['1.30', '1.3 推荐写作'], ['1.50', '1.5 强防复读']],
+    dry_multiplier: [['0', '0 禁用'], ['0.80', '0.8 温和'], ['1.20', '1.2 强（防复读）']],
+    dry_base: [['1.75', '1.75 默认'], ['2.00', '2.00 更敏感']],
+    dry_allowed_length: [['2', '2 默认'], ['4', '4 放宽'], ['6', '6 更宽松']],
+    dry_penalty_last_n: [['-1', '-1 全上下文'], ['64', '64'], ['128', '128']],
+    xtc_probability: [['0', '0 禁用'], ['0.30', '0.3 温和'], ['0.50', '0.5 强去重']],
+    xtc_threshold: [['0.10', '0.1 默认'], ['0.20', '0.2 更频繁']],
+    top_nsigma: [['-1', '-1 禁用'], ['0.50', '0.5 温和'], ['1.00', '1.0 严格']],
+    typical: [['1.00', '1.0 关闭'], ['0.90', '0.9 温和'], ['0.80', '0.8 严格']],
+    dynatemp_range: [['0', '0 禁用'], ['0.50', '0.5 动态'], ['1.00', '1.0 大幅动态']],
+    dynatemp_exp: [['1.00', '1.0 线性'], ['2.00', '2.0 更敏感']],
+    mirostat_lr: [['0.10', '0.1 默认'], ['0.30', '0.3 快'], ['0.50', '0.5 快']],
+    mirostat_ent: [['3.0', '3.0 严谨'], ['5.0', '5.0 默认'], ['7.0', '7.0 创意']],
+    repeat_last_n: [['64', '64 默认'], ['128', '128 更稳'], ['256', '256 强防复读']],
+    seed: [['-1', '-1 随机（推荐）'], ['0', '0 固定'], ['42', '42 固定']],
+    // 🧩 投机解码
+    spec_draft_threads_batch: [['0', '0 跟随（推荐）'], ['4', '4'], ['8', '8'], ['16', '16']],
+    // 🧠 内存
+    kv_unified_per_slot: [['0', '0 不限（推荐）'], ['8192', '8K'], ['16384', '16K'], ['32768', '32K']],
+    cache_reuse: [['0', '0 默认'], ['64', '64'], ['256', '256']],
+    keep: [['0', '0 默认'], ['64', '64'], ['256', '256']],
+    sleep_idle_seconds: [['-1', '-1 不休眠（推荐）'], ['60', '1 分钟'], ['300', '5 分钟'], ['600', '10 分钟']],
+    // 🌐 网络
+    timeout: [['60', '60 秒'], ['300', '5 分钟'], ['3600', '3600 默认']],
+    sse_ping_interval: [['0', '0 禁用'], ['15', '15 秒'], ['30', '30 默认'], ['60', '60 秒']],
+    threads_http: [['-1', '-1 自动（推荐）'], ['1', '1'], ['2', '2'], ['4', '4']],
+    // 🔧 CPU
+    prio: [['0', '0 普通'], ['1', '1'], ['2', '2 高'], ['3', '3 实时']],
+    poll: [['0', '0'], ['50', '50 默认'], ['100', '100']],
+    prio_batch: [['0', '0'], ['1', '1'], ['2', '2']],
+    poll_batch: [['0', '0'], ['50', '50'], ['100', '100']],
+    // 📝 日志
+    log_verbosity: [['0', '0 静默'], ['1', '1 少'], ['2', '2'], ['3', '3 默认'], ['5', '5 全量调试']]
+  };
+
+  function buildAutoPresets(p) {
+    return PARAM_PRESETS[p.key] || [];
+  }
+
+  // ★ 为数字输入框生成 ▾ 预设下拉（只对 input 型、表中有的、无已有预设的参数，放输入框正下方）
+  function addPresetsToAllParams() {
+    if (!paramDefs) return;
+    paramDefs.forEach(function (p) {
+      var opts = PARAM_PRESETS[p.key];
+      if (!opts || !opts.length) return;
+      var el = document.getElementById('p-' + p.key);
+      if (!el || el.tagName !== 'INPUT' || el.type === 'checkbox') return;
+      var field = el.closest('.field');
+      if (!field) return;
+      if (field.querySelector('.auto-preset-row, select.preset[data-target="p-' + p.key + '"]')) return;
+      var sel = document.createElement('select');
+      sel.className = 'preset auto-preset';
+      sel.dataset.target = 'p-' + p.key;
+      sel.title = '一键填入官方推荐值';
+      var html = '<option value="">▾ 推荐值</option>';
+      opts.forEach(function (o) { html += '<option value="' + o[0] + '">' + o[1] + '</option>'; });
+      sel.innerHTML = html;
+      sel.addEventListener('change', function () {
+        if (!sel.value) return;
+        el.value = sel.value;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        sel.value = '';
+      });
+      // 与批大小一致：▾ 预设下拉并排在输入框旁（num-wrap）
+      var nw = el.closest('.num-wrap');
+      if (nw) {
+        nw.appendChild(sel);
+      } else {
+        nw = document.createElement('span');
+        nw.className = 'num-wrap';
+        el.before(nw);
+        nw.appendChild(el);
+        nw.appendChild(sel);
+      }
+    });
+  }
+
+  // ★ 主参数区：给每个参数加 📖 说明按钮（推荐值 + 说明 + 关联）
+  function enhanceParamFields() {
+    if (!window.__paramGuidance) return;
+    document.querySelectorAll('.cfg-group .field').forEach(function (f) {
+      var inp = f.querySelector('input[id^="p-"], select[id^="p-"]');
+      if (!inp) return;
+      var key = inp.id.slice(2);
+      var g = window.__paramGuidance[key];
+      if (!g) return;
+      if (f.querySelector('.param-help-btn')) return;
+      var wrap = document.createElement('span');
+      wrap.className = 'param-help-outer';
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn tiny param-help-btn';
+      btn.textContent = '📖';
+      btn.title = '参数说明与推荐值';
+      var card = document.createElement('div');
+      card.className = 'param-card-wrap';
+      card.style.display = 'none';
+      btn.onclick = function () {
+        if (card.style.display === 'none' || card.style.display === '') {
+          renderParamCard(key, card);
+          card.style.display = 'block';
+          btn.textContent = '📕';
+        } else {
+          card.style.display = 'none';
+          btn.textContent = '📖';
+        }
+      };
+      wrap.appendChild(btn);
+      wrap.appendChild(card);
+      f.appendChild(wrap);
+    });
+  }
+
+  // ★ S6：渲染说明卡片（新增）
+  function renderParamCard(key, container) {
+    const guidance = window.__paramGuidance && window.__paramGuidance[key];
+    if (!guidance) {
+      container.innerHTML = '<div class="empty-hint">暂无说明</div>';
+      return;
+    }
+    const currentVal = document.getElementById('p-' + key) ? document.getElementById('p-' + key).value : '';
+    const rec = guidance.recommendation || '';
+    const isMatch = rec && currentVal && rec.indexOf(currentVal) >= 0;
+    let html = '<div class="param-card">';
+    if (guidance.description) html += '<div class="pc-desc">' + esc(guidance.description) + '</div>';
+    if (rec) {
+      html += '<div class="pc-rec">✅ 推荐值：<strong>' + esc(rec) + '</strong>';
+      if (currentVal) {
+        html += isMatch ? ' <span style="color:#4caf50">（已符合）</span>' : ' <span style="color:#ff9800">（建议调整）</span>';
+      }
+      html += '</div>';
+    }
+    if (guidance.related && guidance.related.length) {
+      html += '<div class="pc-related">⚠️ 关联参数：' + guidance.related.map(function (r) {
+        return '<a href="#" data-jump="p-' + r + '" class="pc-jump">' + esc(r) + '</a>';
+      }).join('、') + '</div>';
+    }
+    if (guidance.note) html += '<div class="pc-note">💡 ' + esc(guidance.note) + '</div>';
+    if (guidance.see_also) html += '<div class="pc-see">📖 更多：' + esc(guidance.see_also) + '</div>';
+    html += '</div>';
+    container.innerHTML = html;
+    container.querySelectorAll('.pc-jump').forEach(function (a) {
+      a.addEventListener('click', function (e) {
+        e.preventDefault();
+        const targetId = this.dataset.jump;
+        const el = document.getElementById(targetId);
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          el.focus();
+          el.style.transition = 'background 0.6s';
+          el.style.background = '#ffff99';
+          setTimeout(function () { el.style.background = ''; }, 1000);
+        }
+      });
+    });
+  }
+
+  // ★ S6：修改 sweepRowHTML 加入 📖 按钮
   function sweepRowHTML(p) {
-    // 预设下拉：把组合档位拆成单个数值选项（不要“1档2档”描述、不要组合串），
-    // 选项即数值本身，选择后追加到输入框（可多次选择累积）
     const singles = [];
     (p.presets || []).forEach(function (pr) {
       String(pr[0]).split(',').forEach(function (s) {
@@ -3135,6 +3392,7 @@
       '<input type="text" id="sw-' + p.key + '" data-key="' + p.key + '" value="' + esc(p.def || '') + '" placeholder="' + esc(p.ph || '逗号分隔多个值（多值=扫描，单值=固定）') + '">' +
       '<button class="btn tiny" data-editor="' + p.key + '" title="折叠 / 展开范围生成与档位">📐</button>' +
       '<select class="preset" data-target="sw-' + p.key + '" title="一键填入常用值"><option value="">▾ 预设</option>' + opts + '</select>' +
+      '<button class="btn tiny" data-help="' + p.key + '" title="参数说明">📖</button>' +
       '<button class="btn tiny" data-clear="' + p.key + '" title="清空此项">✕</button>' +
       '<div class="multi-editor" id="me-' + p.key + '">' +
       (numeric
@@ -3145,9 +3403,11 @@
           '<button class="btn tiny" data-gen="' + p.key + '">生成</button></div>'
         : '') +
       (chips ? '<div class="me-presets"><span>档位</span>' + chips + '</div>' : '') +
-      '</div>';
+      '</div>' +
+      '<div class="param-card-wrap" id="help-wrap-' + p.key + '" style="display:none; margin-top:6px;"></div>';
   }
 
+  // ★ S6：修改 bindSweepRow 绑定 📖 事件
   function bindSweepRow(row) {
     const inp = row.querySelector('input[data-key]');
     if (inp) inp.addEventListener('input', updateSweepEstimate);
@@ -3163,7 +3423,6 @@
       const val = presetSel.value;
       presetSel.value = '';
       if (!target || val === '') return;
-      // 追加去重式：选单个数值就加到输入框，重复值不重复加
       const cur = target.value.trim();
       const parts = cur ? cur.split(',').map(function (s) { return s.trim(); }).filter(Boolean) : [];
       if (parts.indexOf(val) >= 0) return;
@@ -3171,13 +3430,28 @@
       target.value = parts.join(',');
       updateSweepEstimate();
     });
-    // 多值编辑器：📐 展开/收起
+    // ★ S6：📖 说明卡片
+    const helpBtn = row.querySelector('[data-help]');
+    if (helpBtn) {
+      helpBtn.addEventListener('click', function () {
+        const key = helpBtn.dataset.help;
+        const wrap = document.getElementById('help-wrap-' + key);
+        if (!wrap) return;
+        if (wrap.style.display === 'none' || wrap.style.display === '') {
+          wrap.style.display = 'block';
+          renderParamCard(key, wrap);
+          helpBtn.textContent = '📕';
+        } else {
+          wrap.style.display = 'none';
+          helpBtn.textContent = '📖';
+        }
+      });
+    }
     const edBtn = row.querySelector('[data-editor]');
     if (edBtn) edBtn.addEventListener('click', function () {
       const panel = $('me-' + edBtn.dataset.editor);
       if (panel) panel.hidden = !panel.hidden;
     });
-    // 范围生成：min~max:step → 逗号分隔值列表
     const gen = row.querySelector('[data-gen]');
     if (gen) gen.addEventListener('click', function () {
       const key = gen.dataset.gen;
@@ -3199,8 +3473,6 @@
         flashBtn(gen, '✓ ' + vals.length + ' 档');
       }
     });
-    // 预设 chips：追加去重式填入（点一次加一组，重复的值不重复加，
-    // 可连续点多个档位累积多组值到同一输入框，无需手动输逗号）
     row.querySelectorAll('.me-chip').forEach(function (chip) {
       chip.addEventListener('click', function () {
         const target = $('sw-' + chip.dataset.key);
@@ -3220,7 +3492,10 @@
     });
   }
 
+  // ★ S6：addSweepRow 过滤 system 层
   function addSweepRow(p) {
+    const tier = window.__paramTiers && window.__paramTiers[p.key];
+    if (tier === 'system') return;
     const box = $('sweep-params');
     const row = document.createElement('div');
     row.className = 'sweep-row';
@@ -3232,32 +3507,134 @@
     updateSweepEstimate();
   }
 
+  // ★ S6：renderSweepParams 按 Tier 过滤
   function renderSweepParams() {
     const box = $('sweep-params');
     box.innerHTML = '';
-    SWEEP_PARAMS.forEach(function (p) { addSweepRow(p); });
+    const visible = SWEEP_PARAMS.filter(function (p) {
+      const tier = window.__paramTiers && window.__paramTiers[p.key];
+      return tier !== 'system';
+    });
+    visible.forEach(function (p) { addSweepRow(p); });
     const ctxRow = box.querySelector('.preset[data-target="sw-ctx_size"]');
     if (ctxRow) fillCtxPreset(ctxRow, mxcOfSweepModel());
     applySweepGrey();
   }
 
-  // ── 动态添加更多可扫参数（从注册表）──────────────
+  // ── 动态添加更多可扫参数 ──────────────
+  // ★ S7：分组 + 搜索过滤渲染"添加更多参数"下拉
   function loadSweepAddParamOptions() {
     api('/api/params').then(function (res) {
-      const list = (res && res.params) || [];
-      window.__sweepParams = list;
-      const used = {};
-      SWEEP_PARAMS.forEach(function (p) { used[p.key] = true; });
-      const sel = $('sweep-add-param');
-      sel.innerHTML = '<option value="">➕ 添加更多参数…</option>';
-      list.forEach(function (pd) {
-        if (used[pd.key] || ['int', 'float', 'enum', 'bool'].indexOf(pd.kind) < 0) return;
+      window.__sweepParams = (res && res.params) || [];
+      sweepAddFilter();
+    }).catch(function () { /* 忽略加载失败 */ });
+  }
+
+  // ★ 分组 + 搜索过滤渲染"添加更多参数"下拉
+  function sweepAddFilter() {
+    const sel = $('sweep-add-param');
+    if (!sel) return;
+    const used = {};
+    SWEEP_PARAMS.forEach(function (p) { used[p.key] = true; });
+    document.querySelectorAll('#sweep-params .sweep-row').forEach(function (r) { if (r.dataset.key) used[r.dataset.key] = true; });
+    const q = ($('sweep-add-search') ? $('sweep-add-search').value : '').trim().toLowerCase();
+    sel.innerHTML = '<option value="">➕ 添加更多参数…</option>';
+    const groups = {};
+    (window.__sweepParams || []).forEach(function (pd) {
+      if (used[pd.key] || ['int', 'float', 'enum', 'bool'].indexOf(pd.kind) < 0) return;
+      const tier = window.__paramTiers && window.__paramTiers[pd.key];
+      if (tier === 'system') return;
+      if (q && (pd.label + ' ' + pd.key).toLowerCase().indexOf(q) < 0) return;
+      (groups[pd.group] = groups[pd.group] || []).push(pd);
+    });
+    const order = ['basic', 'perf', 'memory', 'cpu', 'sample', 'spec', 'source', 'network', 'chat', 'log'];
+    order.forEach(function (g) {
+      const arr = groups[g];
+      if (!arr || !arr.length) return;
+      const og = document.createElement('optgroup');
+      og.label = GROUP_LABEL[g] || g;
+      arr.forEach(function (pd) {
         const o = document.createElement('option');
         o.value = pd.key;
         o.textContent = pd.label + '（' + pd.key + '）';
-        sel.appendChild(o);
+        og.appendChild(o);
       });
-    }).catch(function () { /* 忽略加载失败 */ });
+      sel.appendChild(og);
+    });
+  }
+
+  // ★ 自动生成预设 chips（sweep 版：多值档位 + 全覆盖）
+  function buildSweepChips(key, pd, type) {
+    if (type === 'bool') return [['on,off', '开 vs 关'], ['on', '开启'], ['off', '关闭']];
+    if (PARAM_PRESETS[key]) {
+      const arr = PARAM_PRESETS[key];
+      const chips = arr.map(function (o) { return [o[0], o[1]]; });
+      if (arr.length > 1) chips.push([arr.map(function (o) { return o[0]; }).join(','), '全覆盖']);
+      return chips;
+    }
+    if (type === 'enum' && pd && pd.default !== '' && pd.default != null) return [[String(pd.default), '默认值']];
+    return [];
+  }
+
+  // ★ 从 registry 加载全部可扫参数（按分组展示）
+  let sweepAllMode = false; // false=默认参数集；true=全部参数（按分组）
+  function showAllSweepParams() {
+    const btn = $('btn-sweep-all');
+    // 已在全部模式 → 恢复默认参数集
+    if (sweepAllMode) {
+      sweepAllMode = false;
+      renderSweepParams();
+      loadSweepAddParamOptions();
+      if (btn) {
+        btn.textContent = '📂 显示全部参数';
+        btn.title = '从 registry 加载全部可扫参数（按分组展示）';
+        flashBtn(btn, '✓ 已恢复默认');
+      }
+      return;
+    }
+    sweepAllMode = true;
+    const box = $('sweep-params');
+    box.innerHTML = '';
+    api('/api/params').then(function (res) {
+      const list = (res && res.params) || [];
+      window.__sweepParams = list;
+      const groups = {};
+      list.forEach(function (pd) {
+        if (['int', 'float', 'enum', 'bool'].indexOf(pd.kind) < 0) return;
+        const tier = window.__paramTiers && window.__paramTiers[pd.key];
+        if (tier === 'system') return;
+        (groups[pd.group] = groups[pd.group] || []).push(pd);
+      });
+      const order = ['basic', 'perf', 'memory', 'cpu', 'sample', 'spec', 'source', 'network', 'chat', 'log'];
+      let added = 0;
+      order.forEach(function (g) {
+        const arr = groups[g];
+        if (!arr || !arr.length) return;
+        const head = document.createElement('div');
+        head.className = 'sweep-group';
+        head.textContent = GROUP_LABEL[g] || g;
+        box.appendChild(head);
+        arr.forEach(function (pd) {
+          const type = sweepKindToType(pd.kind);
+          addSweepRow({
+            key: pd.key, label: pd.label || pd.key, type: type,
+            hint: pd.help || '', def: '', ph: '逗号分隔多个值（多值=扫描，单值=固定）',
+            presets: buildSweepChips(pd.key, pd, type)
+          });
+          added++;
+        });
+      });
+      sweepAddFilter();
+      if (btn) {
+        btn.textContent = '🔙 恢复默认';
+        btn.title = '恢复为默认展示的常用参数集';
+        flashBtn(btn, '✓ 已显示 ' + added + ' 个');
+      }
+    }).catch(function () {
+      sweepAllMode = false;
+      renderSweepParams();
+      if (btn) flashBtn(btn, '✗ 加载失败');
+    });
   }
 
   function sweepKindToType(kind) {
@@ -3282,14 +3659,14 @@
     const pd = (window.__sweepParams || []).find(function (x) { return x.key === key; });
     if (!pd) return;
     const type = sweepKindToType(pd.kind);
+    const tier = window.__paramTiers && window.__paramTiers[key];
+    if (tier === 'system') { flashSelect(sel); return; }
     addSweepRow({
       key: key, label: pd.label || key, type: type,
       hint: pd.help || '', def: '', ph: '逗号分隔多个值（多值=扫描，单值=固定）',
-      presets: buildPresetsFor(pd, type)
+      presets: buildSweepChips(key, pd, type)
     });
-    const opt = Array.prototype.find.call(sel.options, function (o) { return o.value === key; });
-    if (opt) opt.remove();
-    flashSelect(sel);
+    sweepAddFilter();
   }
 
   function fmtDur(secs) {
@@ -3299,7 +3676,6 @@
     return '约 ' + h + ' 小时 ' + m + ' 分钟';
   }
 
-  // 一键给所有参数填入常用档位（智能寻优时全部参与；单值预设项跳过避免误固定）
   function fillAllSweepParams() {
     SWEEP_PARAMS.forEach(function (p) {
       const inp = $('sw-' + p.key);
@@ -3311,26 +3687,27 @@
     updateSweepEstimate();
   }
 
-  // ── 场景模式：一键按场景点亮常用扫描参数组合 ──────────────
   const SCENARIOS = {
-    speed: { // 🚀 极速：全量上 GPU、高并发、大 batch
+    speed: {
       n_gpu_layers: '33', ctx_size: '2048,4096,8192', threads: '16,32',
       batch_size: '1024,2048', flash_attn: 'on', kv_unified: 'on', parallel: '1,4'
     },
-    vram: { // 💾 省显存：量化 KV、低 ctx、部分卸载
+    vram: {
       n_gpu_layers: '0,16', ctx_size: '1024,2048', cache_type_k: 'q8_0', cache_type_v: 'q8_0',
       flash_attn: 'on', kv_unified: 'on', threads: '8'
     },
-    bal: { // ⚖️ 均衡：吞吐与显存兼顾
+    bal: {
       n_gpu_layers: '0,16,33', ctx_size: '2048,4096', threads: '8,16',
       batch_size: '512,1024,2048', flash_attn: 'on', cache_type_k: 'f16,q8_0', cache_type_v: 'f16,q8_0'
     }
   };
+
   function clearAllSweepParams() {
     document.querySelectorAll('#sweep-params input[data-key]').forEach(function (inp) { inp.value = ''; });
     updateSweepEstimate();
     flashBtn($('btn-sweep-clear'), '✓ 已清空');
   }
+
   function applyScenario(name) {
     const sc = SCENARIOS[name];
     if (!sc) return;
@@ -3342,7 +3719,6 @@
     if (chip) flashBtn(chip, '✓ 已应用');
   }
 
-  // ── 动态灰置：按模型元数据置灰不支持的参数 ──────────────
   function sweepModelMeta() {
     const sm = $('sweep-model');
     const sb = bundles.find(function (x) { return x.id === sm.value; });
@@ -3352,6 +3728,7 @@
     const hasMMProj = !!(sb.mmproj && sb.mmproj.path);
     return { isMoe: isMoe, hasMMProj: hasMMProj };
   }
+
   function applySweepGrey() {
     const meta = sweepModelMeta();
     const rules = {
@@ -3374,7 +3751,7 @@
 
   function updateSweepEstimate() {
     const CAP = 512;
-    const PER_COMBO_SEC = 15; // 单个组合平均耗时估算（含启动+推理+停止）
+    const PER_COMBO_SEC = 15;
     let total = 1, tests = 0, any = false;
     const swept = [], fixed = [], untouched = [];
     document.querySelectorAll('#sweep-params input[data-key]').forEach(function (inp) {
@@ -3429,7 +3806,6 @@
       if (fixed.length) parts.push('📌 固定: ' + fixed.join(', '));
       const detail = parts.join('　|　');
       if (total > CAP) {
-        // 超限不拒绝：自动降级为分层覆盖采样（每个参数每档至少测一次）
         const sampled = Math.min(total, CAP);
         const dur2 = fmtDur(sampled * PER_COMBO_SEC);
         est.textContent = '⚠️ 穷举 ' + total + ' 种超上限（' + CAP + '），将自动「覆盖采样」≈' + sampled + ' 种代表组合（保证每个参数每档都测到，' + dur2 + '）' + fixedTxt + '。点击开始即可运行。';
@@ -3466,6 +3842,8 @@
     $('test-start').disabled = true;
     $('test-start').textContent = sweepMode === 'greedy' ? '⏳ 寻优中…' : '⏳ 扫描中…';
     $('test-summary').textContent = sweepMode === 'greedy' ? '🔍 正在智能寻优…' : '🔬 正在扫描…';
+    resetTestProgress();
+    setTestProgress(0, 0, '准备中…');
     api(API.testSweep, { method: 'POST', body: JSON.stringify({
       model_id: modelId,
       prompt: $('sweep-prompt').value.trim(),
@@ -3478,11 +3856,12 @@
     }) }).then(function (res) {
       sweepJobId = (res && res.job_id) || null;
       if (sweepJobId) $('test-cancel').hidden = false;
-      // 超限自动采样提示
       if (res && res.sampled) {
         $('test-summary').textContent = '🔬 穷举 ' + (res.original_total || '?') + ' 种超限，自动「覆盖采样」测试 ' + (res.total || '') + ' 种代表组合（每个参数每档至少测一次）…';
       }
-      // 用总数预填待测行（仅穷举；智能寻优结果按步骤实时出现）
+      if (res && res.total && sweepRunning) {
+        setTestProgress(0, res.total, '共 ' + res.total + ' 组 · 0 完成');
+      }
       if (res && res.total && sweepMode !== 'greedy') {
         const pending = new Array(res.total);
         for (let i = 0; i < res.total; i++) {
@@ -3499,27 +3878,38 @@
     });
   }
 
-  // 由 ws.js 推送 sweep_progress / sweep_done 事件驱动
   function updateSweepItem(msg) {
     const isGreedy = msg.mode === 'greedy';
-    // 6 阶段状态机事件（无 status 字段 = 纯阶段广播）
     if (msg.stage && msg.status === undefined) { setStage(msg.stage); return; }
-    if (msg.type === 'sweep_progress') {
-      sweepItems[msg.combo] = {
-        combo: msg.combo, label: msg.label, status: msg.status,
-        step: msg.step || '', fixed: msg.fixed || '',
-        load_ms: msg.load_ms, tps: msg.tps, tokens: msg.tokens, error: msg.error,
-        prompt_ps: msg.prompt_ps, prompt_ms: msg.prompt_ms, eval_ms: msg.eval_ms, repeats: msg.repeats,
-        cached: msg.cached, vram_gb: msg.vram_gb, audit: msg.audit
-      };
-      $('test-summary').textContent = isGreedy
-        ? '🔍 寻优中… ' + (msg.step || '') + '（' + (msg.combo + 1) + '/' + msg.total + '）'
-        : '🔬 扫描中… 已完成 ' + (msg.combo + 1) + ' / ' + msg.total;
-    } else if (msg.type === 'sweep_done') {
+      if (msg.type === 'sweep_progress') {
+        sweepItems[msg.combo] = {
+          combo: msg.combo, label: msg.label, status: msg.status,
+          step: msg.step || '', fixed: msg.fixed || '',
+          load_ms: msg.load_ms, tps: msg.tps, tokens: msg.tokens, error: msg.error,
+          prompt_ps: msg.prompt_ps, prompt_ms: msg.prompt_ms, eval_ms: msg.eval_ms, repeats: msg.repeats,
+          cached: msg.cached, vram_gb: msg.vram_gb, audit: msg.audit
+        };
+        // 动态估算剩余时间（用已测组合平均耗时）
+        if (!isGreedy && msg.elapsed_ms > 0 && msg.combo >= 0 && msg.total > 0) {
+          const avg = msg.elapsed_ms / (msg.combo + 1);
+          const remain = avg * (msg.total - msg.combo - 1);
+          $('test-summary').textContent = '🔬 扫描中… 已完成 ' + (msg.combo + 1) + ' / ' + msg.total
+            + '（已用 ' + fmtDur(msg.elapsed_ms / 1000) + ' · 剩余 ' + fmtDur(remain / 1000) + '）';
+        } else {
+          $('test-summary').textContent = isGreedy
+            ? '🔍 寻优中… ' + (msg.step || '') + '（' + (msg.combo + 1) + '/' + msg.total + '）'
+            : '🔬 扫描中… 已完成 ' + (msg.combo + 1) + ' / ' + msg.total;
+        }
+        if (msg.total > 0) {
+          setTestProgress(msg.combo + 1, msg.total, (msg.combo + 1) + ' / ' + msg.total);
+        }
+      } else if (msg.type === 'sweep_done') {
       sweepRunning = false;
       hideStage();
       $('test-cancel').hidden = true;
       $('test-export').hidden = (msg.results || []).length === 0;
+      if ($('test-savesnap')) $('test-savesnap').hidden = (msg.results || []).length === 0;
+      if ($('btn-snap-rename')) $('btn-snap-rename').hidden = (msg.results || []).length === 0;
       const ok = (msg.results || []).filter(function (r) { return r.status === 'ok'; }).length;
       let txt;
       if (msg.cancelled) {
@@ -3531,7 +3921,6 @@
         if (msg.best_label) {
           txt += '　最佳 🏆 ' + msg.best_label + (msg.best_tps ? '（' + msg.best_tps.toFixed(1) + ' tok/s）' : '');
         }
-        // 提示还有哪些参数未设置（用默认值）
         const unt = [];
         document.querySelectorAll('#sweep-params input[data-key]').forEach(function (inp) {
           const n = String(inp.value || '').split(',').map(function (s) { return s.trim(); }).filter(Boolean).length;
@@ -3547,14 +3936,18 @@
         }
       }
       $('test-summary').textContent = txt;
+      const doneN = (msg.results || []).length;
+      setTestProgress(doneN, doneN, '完成');
       $('test-start').disabled = false;
       $('test-start').textContent = isGreedy ? '▶ 再次寻优' : '▶ 再次扫描';
       if (msg.best_params && !msg.cancelled) {
         lastBest = { modelId: $('sweep-model').value, params: msg.best_params, meta: msg.best_meta || {}, label: msg.best_label || '' };
         $('test-savecfg').hidden = false;
+        if ($('btn-savecfg-rename')) $('btn-savecfg-rename').hidden = false;
         $('savecfg-row').hidden = true;
       } else {
         $('test-savecfg').hidden = true;
+        if ($('btn-savecfg-rename')) $('btn-savecfg-rename').hidden = true;
         $('savecfg-row').hidden = true;
       }
       renderSweepRadar();
@@ -3566,7 +3959,6 @@
     const box = $('sweep-result');
     if (!sweepItems.length) { box.innerHTML = '<div class="empty-hint">尚未开始扫描。</div>'; return; }
     if (sweepMode === 'greedy') {
-      // 智能寻优：按步骤分组展示，每步内 🏆 标出该参数最优档
       const groups = [];
       sweepItems.forEach(function (it) {
         if (!it) return;
@@ -3659,6 +4051,7 @@
     const sel = $('sweep-chart-metric');
     return sel ? sel.value : 'tps';
   }
+
   function renderSweepChart() {
     const el = $('sweep-chart');
     if (!el || typeof echarts === 'undefined') return;
@@ -3670,7 +4063,7 @@
       if (metric === 'load_ms') return it.load_ms || 0;
       return it.tps || 0;
     };
-    const lower = metric !== 'tps'; // 延迟/加载越低越好
+    const lower = metric !== 'tps';
     const ok = sweepItems.filter(function (i) { return i && i.status === 'ok' && pick(i) > 0; })
       .sort(function (a, b) { return lower ? (pick(a) - pick(b)) : (pick(b) - pick(a)); });
     if (!ok.length) { if (wrap) wrap.hidden = true; return; }
@@ -3692,14 +4085,12 @@
     }, true);
   }
 
-  // 🎯 帕累托前沿图（X 显存 GB × Y 速度 tok/s）
   function renderParetoChart(el, wrap) {
     const pts = sweepItems.filter(function (i) { return i && i.status === 'ok' && i.tps && i.vram_gb > 0; })
       .map(function (i) { return { x: i.vram_gb, y: i.tps, label: i.label || '' }; });
     if (!pts.length) { if (wrap) wrap.hidden = true; return; }
     if (wrap) wrap.hidden = false;
     if (!window.__sweepChart) window.__sweepChart = echarts.init(el);
-    // 帕累托前沿：按显存升序，只有比此前所有点都更快（严格更高 TPS）的点才是前沿
     const sorted = pts.slice().sort(function (a, b) { return a.x - b.x; });
     const frontier = [];
     let bestY = -1;
@@ -3735,7 +4126,6 @@
     }, true);
   }
 
-  // 🕸 性能雷达图（最优 vs 平均，TPS/首token延迟/加载/显存 4 维归一化越高越好）
   function renderSweepRadar() {
     const wrap = $('sweep-radar-wrap');
     const el = $('sweep-radar');
@@ -3795,8 +4185,9 @@
     wrap.hidden = false;
   }
 
-  // ── 6 阶段状态机（validating→auditing→warming_up→benchmarking→cleaning）──
+  // ── 6 阶段状态机 ──────────────────────
   const STAGES = ['queued', 'validating', 'auditing', 'warming_up', 'benchmarking', 'cleaning'];
+
   function setStage(stage) {
     const bar = $('stage-bar');
     if (!bar || !stage || STAGES.indexOf(stage) < 0) return;
@@ -3808,12 +4199,12 @@
       chip.classList.toggle('done', idx < cur);
     });
   }
+
   function hideStage() {
     const bar = $('stage-bar');
     if (bar) bar.hidden = true;
   }
 
-  // 📋 参数审计表（请求 vs 实际生效）
   function auditTableHTML(audit) {
     if (!audit || !audit.length) return '';
     const rows = audit.map(function (a) {
@@ -3824,11 +4215,17 @@
   }
 
   function cancelTestRun() {
-    const jobId = $('tab-sweep').hidden ? testJobId : sweepJobId;
+    const isSweep = !$('tab-sweep').hidden;
+    const jobId = isSweep ? sweepJobId : testJobId;
     if (!jobId) return;
     api(API.testCancel, { method: 'POST', body: JSON.stringify({ job_id: jobId }) }).then(function () {
       flashBtn($('test-cancel'), '已请求取消…');
       $('test-cancel').disabled = true;
+      showToast(isSweep
+        ? '⏹ 已请求取消：<b>停止当前实例并跳过剩余扫描组合</b>'
+        : '⏹ 已请求取消：<b>停止当前实例并跳过剩余模型</b>', 'info');
+    }).catch(function () {
+      showToast('❌ 取消失败，请重试', 'err');
     });
   }
 
@@ -3853,38 +4250,383 @@
     URL.revokeObjectURL(a.href);
   }
 
+  // ★ S8：保存当前结果为命名快照（历史永久保留）
+  function buildSnapName(isSweep, items) {
+    const best = items.filter(function (it) { return it && it.status === 'ok' && it.tps; })
+      .sort(function (a, b) { return b.tps - a.tps; })[0];
+    const bits = [];
+    if (best) {
+      if (best.tps) bits.push(best.tps.toFixed(1) + ' tok/s');
+      if (best.vram_gb) bits.push(best.vram_gb.toFixed(1) + 'GB');
+      if (best.load_ms) bits.push((best.load_ms / 1000).toFixed(0) + 's 加载');
+    }
+    return (isSweep ? '🔬 扫描 ' : '🖥 测试 ') + (bits.join(' · ') || new Date().toLocaleTimeString().slice(0, 5));
+  }
+
+  function saveCurrentSnapshot(rename) {
+    const isSweep = !$('tab-sweep').hidden;
+    const items = isSweep ? sweepItems : testItems;
+    if (!items || !items.length || !items.some(function (it) { return it && it.status; })) {
+      if ($('test-savesnap')) flashBtn($('test-savesnap'), '✗ 无结果');
+      return;
+    }
+    const name = buildSnapName(isSweep, items);
+    if (rename) {
+      // 展开命名行，改名后保存
+      $('test-savesnap').hidden = true;
+      if ($('btn-snap-rename')) $('btn-snap-rename').hidden = true;
+      $('snap-row').hidden = false;
+      $('snap-name').value = name;
+      $('snap-name').focus();
+      $('snap-name').select();
+      return;
+    }
+    // 一键保存（智能名）
+    confirmSnapshot(name);
+  }
+
+  function confirmSnapshot(forcedName) {
+    const btn = $('snap-confirm');
+    const isSweep = !$('tab-sweep').hidden;
+    const items = isSweep ? sweepItems : testItems;
+    const modelSel = isSweep ? $('sweep-model') : null;
+    const modelId = modelSel ? modelSel.value : ($('test-models') ? $('test-models').value : '');
+    const name = (forcedName != null ? forcedName : $('snap-name').value.trim()) || '结果快照';
+    const payload = [];
+    items.forEach(function (it) {
+      if (!it) return;
+      payload.push({
+        name: it.label || it.name || ('组合 ' + it.combo),
+        status: it.status || '', load_ms: it.load_ms || 0, tps: it.tps || 0,
+        tokens: it.tokens || 0, prompt_ms: it.prompt_ms || 0, repeats: it.repeats || 0,
+        cached: !!it.cached, vram_gb: it.vram_gb || 0, audit: it.audit || [], error: it.error || ''
+      });
+    });
+    const okCount = payload.filter(function (x) { return x.status === 'ok'; }).length;
+    let summary = '共测 ' + payload.length + ' 次 · ✅ ' + okCount + ' 成功';
+    const ok = payload.filter(function (x) { return x.status === 'ok' && x.tps; })
+      .sort(function (a, b) { return b.tps - a.tps; });
+    if (ok.length) summary += ' · 最佳 ' + ok[0].name + '（' + ok[0].tps.toFixed(1) + ' tok/s）';
+    const body = {
+      name: name, type: isSweep ? 'sweep' : 'batch',
+      mode: isSweep ? sweepMode : '', model: modelId,
+      prompt: isSweep ? $('sweep-prompt').value : ($('test-prompt') ? $('test-prompt').value : ''),
+      max_tokens: parseInt((isSweep ? $('sweep-max-tokens').value : ($('test-max-tokens') ? $('test-max-tokens').value : 0)), 10) || 0,
+      summary: summary, params: collectSweepParams(), items: payload
+    };
+    btn.disabled = true;
+    api('/api/test/history/save', { method: 'POST', body: JSON.stringify(body) }).then(function () {
+      $('snap-row').hidden = true;
+      $('test-savesnap').hidden = false;
+      if ($('btn-snap-rename')) $('btn-snap-rename').hidden = false;
+      btn.disabled = false;
+      flashBtn($('test-savesnap'), '✓ 已保存');
+      showToast('✅ 已保存为快照：<b>' + esc(name) + '</b>', 'ok');
+      renderTestHistory();
+    }).catch(function (e) {
+      btn.disabled = false;
+      showToast('❌ 保存失败：' + esc(e && e.message ? e.message : '未知错误'), 'err');
+    });
+  }
+
+  function cancelSnapshot() {
+    $('snap-row').hidden = true;
+    $('test-savesnap').hidden = false;
+    if ($('btn-snap-rename')) $('btn-snap-rename').hidden = false;
+  }
+
+  function collectSweepParams() {
+    const pm = {};
+    document.querySelectorAll('#sweep-params .sweep-row').forEach(function (r) {
+      const k = r.dataset.key;
+      const inp = r.querySelector('input[data-key]');
+      if (k && inp && String(inp.value || '').trim()) pm[k] = String(inp.value).trim();
+    });
+    return pm;
+  }
+
+  // ★ S7：renderTestHistory 增加对比功能
   function renderTestHistory() {
     const box = $('test-history-list');
     if (!box) return;
     api(API.testHistory).then(function (res) {
       const list = (res && res.records) || [];
+      const filt = $('hist-filter') ? $('hist-filter').value : 'all';
       if (!list.length) { box.innerHTML = '<div class="empty-hint">暂无测试历史。完成一次测试/扫描后会记录到这里。</div>'; return; }
-      box.innerHTML = list.map(function (rec) {
+      const currentModel = $('sweep-model') ? $('sweep-model').value : '';
+      let filtered = list.filter(function (rec) {
+        if (filt === 'sweep' && rec.type !== 'sweep') return false;
+        if (filt === 'batch' && rec.type !== 'batch') return false;
+        if (filt === 'saved' && !rec.saved) return false;
+        // 「已保存快照」不受当前模型过滤；其余按当前选中模型聚焦
+        if (filt !== 'saved' && currentModel && rec.model && rec.model !== currentModel) return false;
+        return true;
+      });
+      if (!filtered.length) filtered = list.slice(0, 20);
+
+      let html = '<div class="hist-toolbar"><span class="modal-info" style="flex:1"></span>' +
+        '<button class="btn small" id="hist-compare-btn" disabled>📊 对比选中（2-3条）</button></div>';
+      html += filtered.map(function (rec, idx) {
         const icon = rec.type === 'sweep' ? '🔬' : '🖥';
+        const savedTag = rec.saved ? '<span class="hist-saved" title="手动保存的快照，不被自动淘汰">📌</span> ' : '';
+        const nameTag = rec.name ? '<span class="hist-name">' + esc(rec.name) + '</span>' : '';
         const sub = rec.type === 'sweep'
           ? (rec.mode === 'greedy' ? '🔍 智能寻优' : '🔬 参数扫描') + ' · ' + (rec.model || '')
           : '';
-        const items = (rec.items || []).slice(0, 15).map(function (it) {
+        const items = (rec.items || []).slice(0, 10).map(function (it) {
           const cls = it.status === 'ok' ? 'ok' : 'err';
           const txt = it.name + (it.status === 'ok'
             ? ' → ' + (it.tps ? it.tps.toFixed(1) + ' tok/s · ' : '') + Math.round((it.load_ms || 0) / 1000) + 's'
             : ' → ' + (it.error || it.status));
           return '<div class="test-hist-item ' + cls + '">' + esc(txt) + '</div>';
         }).join('');
-        const more = (rec.items || []).length > 15 ? '<div class="test-hist-more">… 共 ' + rec.items.length + ' 项</div>' : '';
-        return '<div class="test-hist-card">' +
-          '<div class="test-hist-head"><span>' + icon + ' <b>' + esc(rec.time) + '</b></span>' +
+        const more = (rec.items || []).length > 10 ? '<div class="test-hist-more">… 共 ' + rec.items.length + ' 项</div>' : '';
+        return '<div class="test-hist-card' + (rec.saved ? ' saved' : '') + '" data-idx="' + idx + '">' +
+          '<div class="test-hist-head"><input type="checkbox" class="hist-cb" data-idx="' + idx + '">' +
+          '<span>' + icon + ' ' + savedTag + '<b>' + esc(rec.time) + '</b></span>' + nameTag +
           '<span class="test-hist-sub">' + esc(rec.summary || '') + (sub ? '　·　' + esc(sub) : '') + '</span>' +
+          '<button class="btn tiny test-hist-detail" data-id="' + esc(rec.id) + '" title="查看详情（参数/结果/导出）">👁</button>' +
           '<button class="btn tiny test-hist-export" data-id="' + esc(rec.id) + '" title="导出该条为 CSV">📥</button></div>' +
           items + more + '</div>';
       }).join('');
+
+      box.innerHTML = html;
+      const compareBtn = document.getElementById('hist-compare-btn');
+      const cbs = box.querySelectorAll('.hist-cb');
+      cbs.forEach(function (cb) {
+        cb.addEventListener('change', function () {
+          const checked = box.querySelectorAll('.hist-cb:checked').length;
+          compareBtn.disabled = checked < 2 || checked > 3;
+          compareBtn.textContent = checked >= 2 ? '📊 对比选中（' + checked + '条）' : '📊 对比选中（2-3条）';
+        });
+      });
+      if (compareBtn) {
+        compareBtn.addEventListener('click', function () {
+          const checked = box.querySelectorAll('.hist-cb:checked');
+          if (checked.length < 2 || checked.length > 3) return;
+          const indices = Array.from(checked).map(function (cb) { return parseInt(cb.dataset.idx, 10); });
+          const records = indices.map(function (i) { return filtered[i]; });
+          renderHistoryDiff(records);
+        });
+      }
       box.querySelectorAll('.test-hist-export').forEach(function (btn) {
         btn.addEventListener('click', function () {
           const rec = list.find(function (x) { return x.id === btn.dataset.id; });
           if (rec) exportHistoryRecord(rec);
         });
       });
+      box.querySelectorAll('.test-hist-detail').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          const rec = list.find(function (x) { return x.id === btn.dataset.id; });
+          if (rec) renderHistoryDetail(rec);
+        });
+      });
     }).catch(function () { box.innerHTML = '<div class="empty-hint">加载历史失败。</div>'; });
+  }
+
+  // ★ S8：历史详情弹窗（概览 + 扫描参数 + 完整结果 + 审计 + 导出）
+  function renderHistoryDetail(rec) {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.id = 'detail-modal';
+    overlay.style.display = 'flex';
+    overlay.innerHTML = '<div class="modal-box" style="max-width:96%;width:1100px;max-height:90vh;overflow:auto;">' +
+      '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;"><h3>👁 ' + esc(rec.name || (rec.type === 'sweep' ? '扫描详情' : '测试详情')) + '</h3>' +
+      '<div style="display:flex;gap:8px;"><button data-export class="btn">📥 导出 CSV</button><button data-close class="btn">✕ 关闭</button></div></div>' +
+      '<div id="detail-body"></div></div>';
+    document.body.appendChild(overlay);
+    overlay.querySelector('[data-close]').addEventListener('click', function () { overlay.remove(); });
+    overlay.querySelector('[data-export]').addEventListener('click', function () { exportHistoryRecord(rec); });
+
+    const body = overlay.querySelector('#detail-body');
+    let html = '<div class="hist-overview">' +
+      '<span>🕐 ' + esc(rec.time) + '</span>' +
+      (rec.name ? '<span>🏷 ' + esc(rec.name) + '</span>' : '') +
+      '<span>📝 ' + esc(rec.summary || '') + '</span>' +
+      (rec.model ? '<span>🎯 ' + esc(rec.model) + '</span>' : '') +
+      (rec.prompt ? '<span>💬 ' + esc(truncate(rec.prompt, 60)) + '</span>' : '') +
+      '</div>';
+    const params = rec.params || {};
+    const keys = Object.keys(params);
+    if (keys.length) {
+      html += '<h4 style="margin:12px 0 6px">⚙️ 扫描参数</h4><table class="audit-table"><thead><tr><th>参数</th><th>档位（逗号=扫描）</th></tr></thead><tbody>';
+      keys.forEach(function (k) {
+        const v = Array.isArray(params[k]) ? params[k].join(', ') : String(params[k] == null ? '' : params[k]);
+        html += '<tr><td><strong>' + esc(k) + '</strong></td><td>' + esc(v) + '</td></tr>';
+      });
+      html += '</tbody></table>';
+    }
+    html += '<h4 style="margin:12px 0 6px">📊 结果（' + (rec.items || []).length + ' 项）</h4><table class="audit-table"><thead><tr><th>组合</th><th>状态</th><th>加载</th><th>吞吐</th><th>首token</th><th>token</th><th>显存</th><th>错误</th></tr></thead><tbody>';
+    (rec.items || []).forEach(function (it) {
+      html += '<tr><td>' + esc(it.name || '') + '</td>' +
+        '<td>' + (it.status === 'ok' ? '✅' : it.status === 'fail' ? '❌' : esc(it.status || '—')) + '</td>' +
+        '<td>' + ((it.load_ms || 0) / 1000).toFixed(1) + 's</td>' +
+        '<td>' + (it.tps ? it.tps.toFixed(2) : '—') + '</td>' +
+        '<td>' + (it.prompt_ms ? Math.round(it.prompt_ms) + 'ms' : '—') + '</td>' +
+        '<td>' + (it.tokens || 0) + '</td>' +
+        '<td>' + (it.vram_gb ? it.vram_gb.toFixed(1) + 'GB' : '—') + '</td>' +
+        '<td>' + esc(it.error || '') + '</td></tr>';
+    });
+    html += '</tbody></table>';
+    const audited = (rec.items || []).find(function (it) { return it.audit && it.audit.length; });
+    if (audited) {
+      html += '<h4 style="margin:12px 0 6px">📋 参数审计（' + esc(audited.name) + '）</h4><table class="audit-table"><thead><tr><th>参数</th><th>请求</th><th>实际生效</th><th>说明</th></tr></thead><tbody>';
+      audited.audit.forEach(function (a) {
+        const same = a.same ? '✅' : '⚠️';
+        html += '<tr><td>' + esc(a.label || a.key) + '</td><td>' + esc(a.requested) + '</td><td>' + esc(a.effective) + ' ' + same + '</td><td>' + esc(a.note || '') + '</td></tr>';
+      });
+      html += '</tbody></table>';
+    }
+    body.innerHTML = html;
+  }
+
+  // ★ S7：新增对比视图
+  function renderHistoryDiff(records) {
+    if (!records || records.length < 2) return;
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.id = 'diff-modal';
+    overlay.style.display = 'flex';
+    overlay.innerHTML = '<div class="modal-box" style="max-width:95%;width:1200px;max-height:90vh;overflow:auto;">' +
+      '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;"><h3>📊 历史对比</h3>' +
+      '<div style="display:flex;gap:8px;"><button data-exportdiff class="btn">📥 导出对比 CSV</button><button data-close class="btn">✕ 关闭</button></div></div>' +
+      '<div id="diff-body"></div></div>';
+    document.body.appendChild(overlay);
+    overlay.querySelector('[data-close]').addEventListener('click', function () { overlay.remove(); });
+    overlay.querySelector('[data-exportdiff]').addEventListener('click', function () { exportHistoryDiff(records); });
+
+    const body = overlay.querySelector('#diff-body');
+    const extractParams = function (rec) {
+      const ok = (rec.items || []).find(function (it) { return it.status === 'ok'; });
+      if (ok && ok.audit && ok.audit.length) {
+        const p = {};
+        ok.audit.forEach(function (a) { p[a.key] = a.effective || a.requested; });
+        return p;
+      }
+      // 回退：用保存的扫描参数集（键→档位值）
+      const p = {};
+      const rp = rec.params || {};
+      Object.keys(rp).forEach(function (k) {
+        const v = rp[k];
+        p[k] = Array.isArray(v) ? v.join(',') : String(v == null ? '' : v);
+      });
+      return p;
+    };
+    const paramsList = records.map(extractParams);
+    const allKeys = new Set();
+    paramsList.forEach(function (p) { Object.keys(p).forEach(function (k) { allKeys.add(k); }); });
+    const diffKeys = Array.from(allKeys).filter(function (k) {
+      const vals = paramsList.map(function (p) { return p[k] || ''; });
+      return vals.some(function (v) { return v !== vals[0]; });
+    });
+
+    let tableHtml = '<table class="audit-table"><thead><tr><th>参数</th>';
+    records.forEach(function (r, i) { tableHtml += '<th>Run ' + (i+1) + '<br><small>' + r.time.slice(5,16) + '</small></th>'; });
+    tableHtml += '<th>差异</th></tr></thead><tbody>';
+    if (diffKeys.length === 0) {
+      tableHtml += '<tr><td colspan="' + (records.length+2) + '" style="text-align:center;color:#8b949e;">✅ 所有参数一致，差异可能来自环境或随机性</td></tr>';
+    } else {
+      diffKeys.forEach(function (k) {
+        const vals = paramsList.map(function (p) { return p[k] || '—'; });
+        const first = vals[0];
+        const isNumeric = vals.every(function (v) { return v !== '—' && !isNaN(parseFloat(v)); });
+        let diffLabel = '';
+        if (isNumeric) {
+          const nums = vals.map(function (v) { return parseFloat(v); });
+          const min = Math.min.apply(null, nums);
+          const max = Math.max.apply(null, nums);
+          const pct = ((max - min) / (Math.abs(min) + 0.001) * 100).toFixed(0);
+          diffLabel = '↕ ' + pct + '% 变化';
+        } else {
+          diffLabel = '⚡ 不同值';
+        }
+        tableHtml += '<tr><td><strong>' + esc(k) + '</strong></td>';
+        vals.forEach(function (v) {
+          const isBest = isNumeric && parseFloat(v) === Math.max.apply(null, vals.map(function (x) { return parseFloat(x) || 0; }));
+          tableHtml += '<td' + (isBest ? ' style="color:#4caf50;font-weight:bold;"' : '') + '>' + esc(v) + '</td>';
+        });
+        tableHtml += '<td>' + diffLabel + '</td></tr>';
+      });
+    }
+    tableHtml += '</tbody></table>';
+
+    let envMsg = '';
+    if (records.some(function (r) { return r.env && r.env.binary_fp; })) {
+      const fps = records.map(function (r) { return r.env ? r.env.binary_fp : ''; });
+      if (fps.some(function (f) { return f !== fps[0]; })) {
+        envMsg = '⚠️ 环境差异：llama-server 版本不同，TPS 差异可能含环境因素';
+      }
+    }
+    if (envMsg) {
+      envMsg = '<div class="audit-item warn" style="margin-bottom:12px;">' + envMsg + '</div>';
+    }
+
+    const tpsList = records.map(function (r) {
+      const ok = (r.items || []).find(function (it) { return it.status === 'ok' && it.tps; });
+      return ok ? ok.tps : 0;
+    });
+    let summary = '';
+    if (tpsList.every(function (t) { return t > 0; })) {
+      const max = Math.max.apply(null, tpsList);
+      const min = Math.min.apply(null, tpsList);
+      const pct = ((max - min) / (min + 0.001) * 100).toFixed(0);
+      const bestIdx = tpsList.indexOf(max);
+      summary = '🏆 最佳 Run ' + (bestIdx+1) + '（' + max.toFixed(1) + ' tok/s），比最慢快 ' + pct + '%';
+      if (diffKeys.length) {
+        const key = diffKeys[0];
+        const vals = paramsList.map(function (p) { return p[key] || '—'; });
+        summary += '，主要变化 ' + key + ' = ' + vals.join(' → ');
+      }
+    } else {
+      summary = '部分 Run 无有效 TPS 数据，请检查失败项';
+    }
+
+    body.innerHTML = envMsg + tableHtml +
+      '<div style="margin-top:16px;padding:12px;background:var(--bg-secondary);border-radius:8px;">📌 ' + summary + '</div>' +
+      '<div id="diff-radar" style="height:260px;margin-top:16px;"></div>';
+
+    if (typeof echarts !== 'undefined') {
+      const el = document.getElementById('diff-radar');
+      const chart = echarts.init(el);
+      const dims = ['TPS', 'TTFT', 'Load', 'VRAM'];
+      const series = records.map(function (rec, i) {
+        const ok = (rec.items || []).find(function (it) { return it.status === 'ok'; });
+        if (!ok) return { name: 'Run ' + (i+1), value: [0,0,0,0] };
+        const tps = ok.tps || 0;
+        const ttft = ok.prompt_ms || 0;
+        const load = (ok.load_ms || 0) / 1000;
+        const vram = ok.vram_gb || 0;
+        const all = records.map(function (r) {
+          const o = (r.items || []).find(function (it) { return it.status === 'ok'; });
+          return o ? { tps: o.tps || 0, ttft: o.prompt_ms || 0, load: (o.load_ms || 0)/1000, vram: o.vram_gb || 0 } : { tps:0, ttft:0, load:0, vram:0 };
+        });
+        const maxTps = Math.max.apply(null, all.map(function (x) { return x.tps; })) || 1;
+        const maxTtft = Math.max.apply(null, all.map(function (x) { return x.ttft; })) || 1;
+        const maxLoad = Math.max.apply(null, all.map(function (x) { return x.load; })) || 1;
+        const maxVram = Math.max.apply(null, all.map(function (x) { return x.vram; })) || 1;
+        return {
+          name: 'Run ' + (i+1),
+          value: [
+            tps / maxTps,
+            1 - (ttft / maxTtft),
+            1 - (load / maxLoad),
+            1 - (vram / maxVram)
+          ]
+        };
+      });
+      chart.setOption({
+        tooltip: {},
+        legend: { bottom: 0, data: series.map(function (s) { return s.name; }) },
+        radar: { indicator: dims.map(function (d) { return { name: d, max: 1 }; }), radius: '65%' },
+        series: [{
+          type: 'radar',
+          data: series.map(function (s) {
+            return { name: s.name, value: s.value, areaStyle: { opacity: 0.3 } };
+          })
+        }]
+      });
+      window.addEventListener('resize', function () { chart.resize(); });
+    }
   }
 
   function clearTestHistory() {
@@ -3917,8 +4659,62 @@
     URL.revokeObjectURL(a.href);
   }
 
-  // 点击 💾 → 显示命名行（内嵌浏览器不支持 prompt，改用弹窗内输入框）
-  function saveBestConfig() {
+  // ★ S8：导出多条历史对比为 CSV（指标 + 参数差异）
+  function exportHistoryDiff(records) {
+    const getBest = function (r) {
+      return (r.items || []).filter(function (it) { return it.status === 'ok' && it.tps; })
+        .sort(function (a, b) { return b.tps - a.tps; })[0];
+    };
+    const okItems = records.map(getBest);
+    const rows = [['对比导出', records.length + ' 条历史', new Date().toLocaleString()], []];
+    rows[1].push('指标');
+    records.forEach(function (r, i) { rows[1].push('Run ' + (i + 1) + ' ' + (r.name || '')); });
+    const metrics = [
+      ['吞吐 (tok/s)', function (it) { return it ? it.tps.toFixed(2) : ''; }],
+      ['首 token (ms)', function (it) { return it && it.prompt_ms ? Math.round(it.prompt_ms) : ''; }],
+      ['加载 (ms)', function (it) { return it ? it.load_ms : ''; }],
+      ['生成 (tok)', function (it) { return it ? it.tokens : ''; }],
+      ['显存 (GB)', function (it) { return it && it.vram_gb ? it.vram_gb.toFixed(1) : ''; }],
+      ['次数', function (it) { return it && it.repeats ? it.repeats : 1; }]
+    ];
+    metrics.forEach(function (m) {
+      const row = [m[0]];
+      okItems.forEach(function (it) { row.push(m[1](it)); });
+      rows.push(row);
+    });
+    rows.push([]);
+    const paramsList = records.map(function (r) { return r.params || {}; });
+    const allKeys = new Set();
+    paramsList.forEach(function (p) { Object.keys(p).forEach(function (k) { allKeys.add(k); }); });
+    const diffKeys = Array.from(allKeys).filter(function (k) {
+      const vals = paramsList.map(function (p) {
+        const v = p[k]; return Array.isArray(v) ? v.join(',') : String(v == null ? '' : v);
+      });
+      return vals.some(function (v) { return v !== vals[0]; });
+    });
+    if (diffKeys.length) {
+      rows.push(['参数差异']);
+      diffKeys.forEach(function (k) {
+        const row = [k];
+        paramsList.forEach(function (p) {
+          const v = p[k];
+          row.push(Array.isArray(v) ? v.join(',') : String(v == null ? '' : v));
+        });
+        rows.push(row);
+      });
+    }
+    const csv = rows.map(function (r) {
+      return r.map(function (c) { return '"' + String(c == null ? '' : c).replace(/"/g, '""') + '"'; }).join(',');
+    }).join('\n');
+    const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'compare_' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-') + '.csv';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  function saveBestConfig(rename) {
     if (!lastBest) return;
     const m = lastBest.meta || {};
     const bits = [];
@@ -3926,16 +4722,24 @@
     if (m.n_gpu_layers !== undefined && m.n_gpu_layers !== null) bits.push('GPU' + m.n_gpu_layers);
     if (m.tps) bits.push(m.tps.toFixed(1) + ' tok/s');
     if (m.mode === 'greedy') bits.push('寻优');
-    $('savecfg-name').value = '🏆 ' + (bits.join(' · ') || '最优配置');
-    $('test-savecfg').hidden = true;
-    $('savecfg-row').hidden = false;
-    $('savecfg-name').focus();
-    $('savecfg-name').select();
+    const name = '🏆 ' + (bits.join(' · ') || '最优配置');
+    if (rename) {
+      // 展开命名行，改名后保存
+      $('savecfg-name').value = name;
+      $('test-savecfg').hidden = true;
+      if ($('btn-savecfg-rename')) $('btn-savecfg-rename').hidden = true;
+      $('savecfg-row').hidden = false;
+      $('savecfg-name').focus();
+      $('savecfg-name').select();
+      return;
+    }
+    // 一键保存（智能名）
+    saveConfigNow(name);
   }
 
-  function saveConfigNow() {
+  function saveConfigNow(forcedName) {
     if (!lastBest) { $('savecfg-row').hidden = true; $('test-savecfg').hidden = false; return; }
-    const name = $('savecfg-name').value.trim() || '最优配置';
+    const name = (forcedName != null ? forcedName : $('savecfg-name').value.trim()) || '最优配置';
     const btn = $('savecfg-confirm');
     btn.disabled = true;
     api('/api/bundles/' + lastBest.modelId + '/configs', {
@@ -3944,16 +4748,17 @@
     }).then(function () {
       $('savecfg-row').hidden = true;
       $('test-savecfg').hidden = false;
+      if ($('btn-savecfg-rename')) $('btn-savecfg-rename').hidden = false;
       btn.disabled = false;
-      flashBtn(btn, '✓ 已保存');
+      flashBtn($('test-savecfg'), '✓ 已保存');
+      showToast('✅ 已保存到模型库：<b>' + esc(name) + '</b>', 'ok');
       refreshBundles();
-    }).catch(function () {
+    }).catch(function (e) {
       btn.disabled = false;
-      flashBtn(btn, '✗ 失败');
+      showToast('❌ 保存失败：' + esc(e && e.message ? e.message : '未知错误'), 'err');
     });
   }
 
-  // 把参数对象填入主表单（复选框/数值/下拉通用）
   function applyParamsToForm(params) {
     Object.keys(params || {}).forEach(function (k) {
       const el = $('p-' + k);
@@ -3963,31 +4768,94 @@
     });
   }
 
-  // 一键把测试配置填入启动参数并选中该模型（模型库抽屉用）
+  // 完整重置参数表单到该模型的默认状态（清空所有 p-* 字段，再应用模型 default_params）
+  function resetFormToModelDefault(b) {
+    document.querySelectorAll('[id^="p-"]').forEach(function (el) {
+      if (el.type === 'checkbox') { el.checked = false; return; }
+      if (el.tagName === 'SELECT') { if (el.options && el.options.length) el.selectedIndex = 0; return; }
+      if (el.value !== undefined) el.value = '';
+    });
+    const dp = b.default_params || {};
+    if (dp.ctx_size) $('p-ctx_size').value = dp.ctx_size;
+    if (dp.n_gpu_layers !== undefined && dp.n_gpu_layers !== null) $('p-n_gpu_layers').value = dp.n_gpu_layers;
+    if (dp.flash_attn) $('p-flash_attn').value = dp.flash_attn;
+    if (dp.load_mode) $('p-load_mode').value = dp.load_mode;
+    if (dp.cpu_moe) $('p-cpu_moe').checked = true;
+  }
+
+  // 填入每个参数的官方默认值（registry default）+ 模型 default_params，
+  // 让「🧹 还原」后输入框直接显示默认值，而不是留空
+  function applyOfficialDefaults(b) {
+    (paramDefs || []).forEach(function (p) {
+      const el = $('p-' + p.key);
+      if (!el) return;
+      const d = p.default;
+      if (d === undefined || d === null || d === '') {
+        if (el.type === 'checkbox') el.checked = false;
+        else if (el.value !== undefined) el.value = '';
+        return;
+      }
+      if (el.type === 'checkbox') { el.checked = !!d; return; }
+      if (el.tagName === 'SELECT') {
+        const v = String(d);
+        let found = false;
+        Array.from(el.options).forEach(function (o) { if (String(o.value) === v) { el.value = o.value; found = true; } });
+        if (!found) el.selectedIndex = 0;
+        return;
+      }
+      if (el.value !== undefined) el.value = d;
+    });
+    if (!b) return;
+    const dp = b.default_params || {};
+    if (dp.ctx_size) $('p-ctx_size').value = dp.ctx_size;
+    if (dp.n_gpu_layers !== undefined && dp.n_gpu_layers !== null) $('p-n_gpu_layers').value = dp.n_gpu_layers;
+    if (dp.flash_attn) $('p-flash_attn').value = dp.flash_attn;
+    if (dp.load_mode) $('p-load_mode').value = dp.load_mode;
+    if (dp.cpu_moe) $('p-cpu_moe').checked = true;
+  }
+
+  // ★ 完整套用测试配置（S3）：重置到模型默认 → 应用配置参数 → 刷新预览/审计。
+  //   保证配置外的参数也回到默认（与测试时一致），避免残留上次的表单值
+  function applyConfigFull(b, c) {
+    $('model-select').value = b.id;
+    selectedId = b.id;
+    onModelChangeMeta();
+    resetFormToModelDefault(b);
+    applyParamsToForm(c.params || {});
+    refreshPreview();
+    runAudit();
+    closeLibrary();
+    const n = Object.keys(c.params || {}).length;
+    const banner = document.createElement('div');
+    banner.className = 'audit-item info apply-banner';
+    banner.style.margin = '8px 0';
+    banner.innerHTML = `🧪 已完整套用测试配置「${esc(c.name)}」：${n} 个参数已应用，其余参数已还原为该模型默认值`;
+    const box = $('audit-box');
+    if (box) {
+      const old = box.querySelector('.apply-banner');
+      if (old) old.remove();
+      box.prepend(banner);
+      setTimeout(function () { if (banner.parentNode) banner.remove(); }, 6000);
+    }
+    flashBtn($('btn-apply-config'), '✓ 已套用');
+  }
+
+  // ★ S3：套用测试配置 = 完整还原（先重置到模型默认，再应用配置），
+  //   确保配置外的参数也回到默认（与测试时一致），避免残留上次表单值
   function applyTestConfig(bundleId, cfgId) {
     const b = bundles.find(function (x) { return x.id === bundleId; });
     if (!b) return;
     const c = (b.test_configs || []).find(function (x) { return x.id === cfgId; });
     if (!c) return;
-    $('model-select').value = bundleId;
-    onModelChange();
-    applyParamsToForm(c.params || {});
-    refreshPreview();
-    runAudit();
-    closeLibrary();
-    flashBtn($('btn-apply-config'), '✓ 已套用');
+    applyConfigFull(b, c);
   }
 
-  // 主面板「🧪 测试配置」下拉套用当前所选配置
   function applySelectedConfig() {
     const b = bundles.find(function (x) { return x.id === selectedId; });
     if (!b) return;
     const c = (b.test_configs || []).find(function (x) { return x.id === $('test-config-select').value; });
     if (!c) return;
-    applyParamsToForm(c.params || {});
-    refreshPreview();
-    runAudit();
-    flashBtn($('btn-apply-config'), '✓ 已套用');
+    applyConfigFull(b, c);
   }
 
   function deleteTestConfig(bundleId, cfgId) {
@@ -4002,11 +4870,13 @@
     if (!mb) return '-';
     return mb >= 1024 ? (mb / 1024).toFixed(1) + ' GB' : Math.round(mb) + ' MB';
   }
+
   function baseName(p) {
     if (!p) return '';
     const parts = String(p).split(/[\\/]/);
     return parts[parts.length - 1];
   }
+
   function esc(s) {
     return String(s == null ? '' : s)
       .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');

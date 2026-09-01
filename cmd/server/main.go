@@ -678,6 +678,29 @@ type matchDraftCandidate struct {
 //  1. 主模型同目录下文件名含 draft/mtp 的伴生草稿（天然匹配）
 //  2. 主模型自带 MTP 头 → 无需外部草稿（draft-mtp 模式）
 //  3. 模型库中同架构、且文件更小的带 MTP 头模型（跨模型投机）
+//
+// draftCleanups 用于从模型名提取“家族名”（去掉量化 / MTP / head / draft 标记）
+var draftCleanups = []string{
+	"-Q4_K_M", "-Q8_0", "-Q3_K_S", "-Q2_K_S", "-Q5_K_S", "-Q3_K_L", "-Q3_K_XL", "-Q3_K_XS",
+	"-Q4_K_S", "-Q5_K_M", "-Q6_K", "-Q4_0", "-Q5_0", "-Q2_K", "-Q1_K", "-Q0",
+	"-IQ3_M", "-IQ2_M", "-IQ1_S", "-IQ1_M", "-IQ2_XXS", "-IQ3_XXS", "-IQ4_XS", "-IQ5_WQ",
+	"-F16", "-BF16", "-FP16", "-FP32", "-NVFP4", "-MXFP4",
+	"-MTP", "-mtp", "mtp-", "MTP-", "-head", "head-", "-draft", "draft-",
+	"-DSpark", "-dspark", "-DSPARK", "-DFlash", "-dflash", "-DFLASH",
+}
+
+// modelFamily 提取模型“家族名”（同系列 ≈ 同 vocab/架构，可安全投机）
+func modelFamily(name string) string {
+	base := name
+	if i := strings.Index(base, ".gguf"); i >= 0 {
+		base = base[:i]
+	}
+	for _, c := range draftCleanups {
+		base = strings.ReplaceAll(base, c, "")
+	}
+	return strings.Trim(base, "-_ ")
+}
+
 func (a *App) handleMatchDraft(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	b, ok := a.bundles.Get(id)
@@ -691,6 +714,7 @@ func (a *App) handleMatchDraft(w http.ResponseWriter, r *http.Request) {
 		mainArch = b.BaseModel.Metadata.Architecture
 	}
 	mainSize := b.BaseModel.FileSizeMB
+	mainFamily := modelFamily(filepath.Base(mainPath))
 
 	var candidates []matchDraftCandidate
 	push := func(c matchDraftCandidate) {
@@ -713,7 +737,7 @@ func (a *App) handleMatchDraft(w http.ResponseWriter, r *http.Request) {
 			Reason: "主模型自带 MTP 头，用 --spec-type draft-mtp 即可投机，无需外部草稿", Score: 100,
 		})
 	}
-	// 2) 同目录伴生 draft（文件名含 draft）
+	// 2) 同目录 MTP/draft 伴生文件（如 mtp-XXX-head，专为该模型训练，最适配）
 	dir := filepath.Dir(mainPath)
 	if entries, err := os.ReadDir(dir); err == nil {
 		for _, e := range entries {
@@ -725,10 +749,13 @@ func (a *App) handleMatchDraft(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			p := filepath.Join(dir, e.Name())
-			push(matchDraftCandidate{Path: p, Name: e.Name(), Reason: "同目录伴生草稿", Score: 90})
+			push(matchDraftCandidate{Path: p, Name: e.Name(), Reason: "同目录 MTP/draft 伴生文件（最适配）", Score: 95})
 		}
 	}
-	// 3) 模型库中同架构小模型（带 MTP 头）
+	// 3) 模型库中同架构 + 更小的模型（草稿）
+	//    普通架构（MTP/跨模型）：要求同系列（同家族名），vocab 才匹配
+	//    dflash/dspark 扩散式草稿架构：同架构即可（这类草稿本就跨系列配套使用，如 LFM dspark 配 DFlash 主模型）
+	isDflash := mainArch == "dflash"
 	if mainArch != "" {
 		for _, x := range a.bundles.List() {
 			if x.ID == id || x.BaseModel.Path == mainPath {
@@ -738,19 +765,41 @@ func (a *App) handleMatchDraft(w http.ResponseWriter, r *http.Request) {
 			if x.BaseModel.Metadata != nil {
 				arch = x.BaseModel.Metadata.Architecture
 			}
-			if arch != mainArch {
+			// 架构过滤：普通候选要求同架构；
+			// dspark/dflash 扩散草稿放宽为「同架构 或 同系列」（跨架构扩散头，
+			// 如 LFM2.5-2.6B(lfm2) 主模型 配 LFM2.5-2.6B-DSpark(dflash) 草稿）
+			xName := filepath.Base(x.BaseModel.Path)
+			lower := strings.ToLower(xName)
+			isDiffusion := strings.Contains(lower, "dspark") || strings.Contains(lower, "dflash")
+			xFamily := modelFamily(xName)
+			if !isDiffusion && arch != mainArch {
 				continue
 			}
-			// 草稿应比主模型小很多（更快投机）
+			if isDiffusion && arch != mainArch && (mainFamily == "" || xFamily != mainFamily) {
+				continue
+			}
+			// 草稿应比主模型小（更快投机）
 			if x.BaseModel.FileSizeMB > 0 && mainSize > 0 && x.BaseModel.FileSizeMB >= mainSize {
 				continue
 			}
-			// 优先带 MTP 头的（nextn 张量），否则用同架构小模型
-			score := 60
+			// 家族过滤：普通候选要求同系列（词表匹配）；dflash 主模型允许同架构跨系列（dspark/dflash 扩散草稿）
+			if !isDflash && mainFamily != "" && xFamily != mainFamily {
+				continue
+			}
+			score := 75
 			reason := "同架构小模型（跨模型投机）"
 			if bundle.HasMTPHeadByFile(x.BaseModel.Path) {
-				score = 80
-				reason = "同架构带 MTP 头的小模型"
+				score = 90
+				reason = "同架构带 MTP 头的小模型（推荐）"
+			} else if strings.Contains(lower, "dspark") || strings.Contains(lower, "dflash") {
+				score = 88
+				if arch == mainArch {
+					reason = "同架构 dspark/dflash 扩散草稿"
+				} else {
+					reason = "同系列 dspark/dflash 扩散草稿（跨架构扩散头）"
+				}
+			} else if xFamily == mainFamily {
+				reason = "同系列模型（跨模型投机）"
 			}
 			push(matchDraftCandidate{Path: x.BaseModel.Path, Name: x.Name,
 				FileSizeMB: x.BaseModel.FileSizeMB, Architecture: arch, Reason: reason, Score: score})
@@ -758,12 +807,38 @@ func (a *App) handleMatchDraft(w http.ResponseWriter, r *http.Request) {
 	}
 	// 按分数降序
 	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].Score > candidates[j].Score })
+
+	// 无候选时给出精准原因（避免用户看到空结果却不知道为什么）
+	emptyReason := ""
+	if len(candidates) == 0 {
+		archCount := 0
+		for _, x := range a.bundles.List() {
+			if x.ID == id || x.BaseModel.Path == mainPath {
+				continue
+			}
+			if mainArch != "" && x.BaseModel.Metadata != nil && x.BaseModel.Metadata.Architecture == mainArch {
+				archCount++
+			}
+		}
+		switch {
+		case mainArch == "":
+			emptyReason = "无法读取主模型架构信息（模型文件可能缺失或未解析），无法匹配草稿"
+		case archCount == 0:
+			emptyReason = "模型库中没有同架构（" + mainArch + "）的其他模型，无法投机解码"
+		case isDflash:
+			emptyReason = "该模型已是同架构（dflash/dspark）中最小的模型，没有更小的扩散草稿候选（投机草稿需比主模型更小才有加速）"
+		default:
+			emptyReason = "模型库中没有比该模型更小且同系列的草稿候选（投机草稿需比主模型小，且词表需匹配）"
+		}
+	}
 	a.writeJSON(w, http.StatusOK, map[string]any{
-		"match":     candidates,
-		"main_arch": mainArch,
-		"main_size": mainSize,
-		"has_mtp":   len(candidates) > 0 && candidates[0].Path == "",
-		"recommend": firstDraftPath(candidates),
+		"match":        candidates,
+		"main_arch":    mainArch,
+		"main_size":    mainSize,
+		"main_family":  mainFamily,
+		"has_mtp":      len(candidates) > 0 && candidates[0].Path == "",
+		"recommend":    firstDraftPath(candidates),
+		"empty_reason": emptyReason,
 	})
 }
 
@@ -2114,10 +2189,10 @@ func (a *App) handleStart(w http.ResponseWriter, r *http.Request) {
 	sess, err := a.launch(req.BundleID, req.Port, req.Params, false)
 	if err != nil {
 		code := http.StatusInternalServerError
-		if err == errPortInUse || err == errBundleRunning || err == errBundleNotFound {
+		if errors.Is(err, errPortInUse) || errors.Is(err, errBundleRunning) || errors.Is(err, errBundleNotFound) {
 			code = http.StatusConflict
 		}
-		if err == errBundleNotFound {
+		if errors.Is(err, errBundleNotFound) {
 			code = http.StatusNotFound
 		}
 		a.writeJSON(w, code, map[string]string{"error": err.Error()})
@@ -2319,13 +2394,18 @@ type testRequest struct {
 
 // ── 测试历史（持久化到 data/test_history.json）────────────────
 type TestHistoryItem struct {
-	Name   string  `json:"name"`
-	Label  string  `json:"label,omitempty"`
-	Status string  `json:"status"`
-	LoadMS int64   `json:"load_ms"`
-	TPS    float64 `json:"tps"`
-	Tokens int     `json:"tokens"`
-	Error  string  `json:"error,omitempty"`
+	Name     string       `json:"name"`
+	Label    string       `json:"label,omitempty"`
+	Status   string       `json:"status"`
+	LoadMS   int64        `json:"load_ms"`
+	TPS      float64      `json:"tps"`
+	Tokens   int          `json:"tokens"`
+	PromptMS float64      `json:"prompt_ms,omitempty"`
+	Repeats  int          `json:"repeats,omitempty"`
+	Cached   bool         `json:"cached,omitempty"`
+	VRAMGB   float64      `json:"vram_gb,omitempty"`
+	Audit    []paramAudit `json:"audit,omitempty"`
+	Error    string       `json:"error,omitempty"`
 }
 
 type TestHistoryRecord struct {
@@ -2333,10 +2413,13 @@ type TestHistoryRecord struct {
 	Time      string            `json:"time"`
 	Type      string            `json:"type"` // batch | sweep
 	Mode      string            `json:"mode,omitempty"`
+	Name      string            `json:"name,omitempty"`  // 自定义快照名（手动保存）
+	Saved     bool              `json:"saved,omitempty"` // 手动保存的命名快照（不被自动记录淘汰）
 	Model     string            `json:"model,omitempty"` // 扫描的目标模型
 	Prompt    string            `json:"prompt"`
 	MaxTokens int               `json:"max_tokens"`
 	Summary   string            `json:"summary"`
+	Params    map[string]any    `json:"params,omitempty"` // 参与组合的参数集（键→档位值）
 	Items     []TestHistoryItem `json:"items"`
 }
 
@@ -2448,9 +2531,23 @@ func (a *App) saveTestHistory(list []TestHistoryRecord) {
 func (a *App) appendTestHistory(rec TestHistoryRecord) {
 	a.mu.Lock()
 	a.testHistory = append([]TestHistoryRecord{rec}, a.testHistory...)
-	if len(a.testHistory) > 50 {
-		a.testHistory = a.testHistory[:50]
+	// 手动保存的命名快照永久保留；自动记录保留最近 60 条
+	kept := make([]TestHistoryRecord, 0, len(a.testHistory))
+	auto := make([]TestHistoryRecord, 0, len(a.testHistory))
+	for _, r := range a.testHistory {
+		if r.Saved {
+			kept = append(kept, r)
+		} else {
+			auto = append(auto, r)
+		}
 	}
+	if len(auto) > 60 {
+		auto = auto[:60]
+	}
+	merged := make([]TestHistoryRecord, 0, len(kept)+len(auto))
+	merged = append(merged, kept...)
+	merged = append(merged, auto...)
+	a.testHistory = merged
 	copyList := make([]TestHistoryRecord, len(a.testHistory))
 	copy(copyList, a.testHistory)
 	a.mu.Unlock()
@@ -2469,7 +2566,7 @@ func (a *App) recordBatchHistory(req testRequest, results []testResult) {
 	items := make([]TestHistoryItem, 0, len(results))
 	bestTPS, bestName, okCount := 0.0, "", 0
 	for _, r := range results {
-		items = append(items, TestHistoryItem{Name: r.Name, Status: r.Status, LoadMS: r.LoadMS, TPS: r.TPS, Tokens: r.Tokens, Error: r.Error})
+		items = append(items, TestHistoryItem{Name: r.Name, Status: r.Status, LoadMS: r.LoadMS, TPS: r.TPS, Tokens: r.Tokens, PromptMS: r.PromptMS, Repeats: r.Repeats, VRAMGB: r.VRAMGB, Audit: r.Audit, Error: r.Error})
 		if r.Status == "ok" && r.TPS > bestTPS {
 			bestTPS, bestName = r.TPS, r.Name
 		}
@@ -2497,7 +2594,7 @@ func (a *App) recordSweepHistory(modelName string, req sweepRequest, mode string
 	items := make([]TestHistoryItem, 0, len(results))
 	bestTPS, bestLabel, okCount := 0.0, "", 0
 	for _, r := range results {
-		items = append(items, TestHistoryItem{Name: r.Label, Status: r.Status, LoadMS: r.LoadMS, TPS: r.TPS, Tokens: r.Tokens, Error: r.Error})
+		items = append(items, TestHistoryItem{Name: r.Label, Status: r.Status, LoadMS: r.LoadMS, TPS: r.TPS, Tokens: r.Tokens, PromptMS: r.PromptMS, Repeats: r.Repeats, Cached: r.Cached, VRAMGB: r.VRAMGB, Audit: r.Audit, Error: r.Error})
 		if r.Status == "ok" && r.TPS > bestTPS {
 			bestTPS, bestLabel = r.TPS, r.Label
 		}
@@ -2509,6 +2606,12 @@ func (a *App) recordSweepHistory(modelName string, req sweepRequest, mode string
 	if bestLabel != "" {
 		summary += fmt.Sprintf(" · 最佳 %s（%.1f tok/s）", bestLabel, bestTPS)
 	}
+	pm := make(map[string]any, len(req.Params))
+	for _, p := range req.Params {
+		if p.Key != "" {
+			pm[p.Key] = p.Values
+		}
+	}
 	a.appendTestHistory(TestHistoryRecord{
 		ID:        "h" + strconv.FormatInt(time.Now().UnixNano(), 36),
 		Time:      time.Now().Format("2006-01-02 15:04:05"),
@@ -2518,6 +2621,7 @@ func (a *App) recordSweepHistory(modelName string, req sweepRequest, mode string
 		Prompt:    req.Prompt,
 		MaxTokens: req.MaxTokens,
 		Summary:   summary,
+		Params:    pm,
 		Items:     items,
 	})
 }
@@ -2562,6 +2666,47 @@ func (a *App) handleTestHistoryClear(w http.ResponseWriter, r *http.Request) {
 	a.writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+// handleTestHistorySave persists the current results as a named snapshot.
+func (a *App) handleTestHistorySave(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name      string            `json:"name"`
+		Type      string            `json:"type"`
+		Mode      string            `json:"mode"`
+		Model     string            `json:"model"`
+		Prompt    string            `json:"prompt"`
+		MaxTokens int               `json:"max_tokens"`
+		Summary   string            `json:"summary"`
+		Params    map[string]any    `json:"params"`
+		Items     []TestHistoryItem `json:"items"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if req.Name == "" {
+		req.Name = "结果快照"
+	}
+	if req.Type == "" {
+		req.Type = "sweep"
+	}
+	rec := TestHistoryRecord{
+		ID:        "h" + strconv.FormatInt(time.Now().UnixNano(), 36),
+		Time:      time.Now().Format("2006-01-02 15:04:05"),
+		Type:      req.Type,
+		Mode:      req.Mode,
+		Name:      req.Name,
+		Saved:     true,
+		Model:     req.Model,
+		Prompt:    req.Prompt,
+		MaxTokens: req.MaxTokens,
+		Summary:   req.Summary,
+		Params:    req.Params,
+		Items:     req.Items,
+	}
+	a.appendTestHistory(rec)
+	a.writeJSON(w, http.StatusOK, rec)
+}
+
 // testResult is one model's batch-test outcome.
 type testResult struct {
 	BundleID string       `json:"bundle_id"`
@@ -2588,6 +2733,86 @@ type paramAudit struct {
 	Effective string `json:"effective"`
 	Same      bool   `json:"same"`
 	Note      string `json:"note,omitempty"`
+}
+
+// tokenizeRequest is the body of POST /api/tokenize.
+type tokenizeRequest struct {
+	ModelID string `json:"model_id"`
+	Prompt  string `json:"prompt"`
+	MaxTok  int    `json:"max_tokens"`
+}
+
+// handleTokenize counts tokens in a prompt using the model's tokenizer. It
+// shells out to llama-server's /v1/tokenize endpoint on a local port, mirroring
+// the chat-completions measurement path. Returns token count and char count.
+func (a *App) handleTokenize(w http.ResponseWriter, r *http.Request) {
+	var req tokenizeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	_, ok := a.bundles.Get(req.ModelID)
+	if !ok {
+		a.writeJSON(w, http.StatusNotFound, map[string]string{"error": "模型不存在"})
+		return
+	}
+	port := a.findFreePort(9300)
+	body, _ := json.Marshal(map[string]any{
+		"model":      "test",
+		"prompt":     req.Prompt,
+		"max_tokens": req.MaxTok,
+	})
+	req2, err := http.NewRequest(http.MethodPost,
+		fmt.Sprintf("http://127.0.0.1:%d/v1/tokenize", port), bytes.NewReader(body))
+	if err != nil {
+		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	req2.Header.Set("Content-Type", "application/json")
+	if key := a.effectiveAPIKey(); key != "" {
+		req2.Header.Set("Authorization", "Bearer "+key)
+	}
+	resp, err := (&http.Client{Timeout: 90 * time.Second}).Do(req2)
+	if err != nil {
+		a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		bb, _ := io.ReadAll(resp.Body)
+		a.writeJSON(w, http.StatusBadGateway, map[string]any{
+			"status": resp.StatusCode, "error": truncateStr(string(bb), 200),
+		})
+		return
+	}
+	var out struct {
+		Count int `json:"count"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	a.writeJSON(w, http.StatusOK, map[string]any{
+		"model_id": req.ModelID, "token_count": out.Count, "chars": len(req.Prompt),
+	})
+}
+
+// score computes the quality score for a tokenize result.
+// It rewards high token count relative to input length and penalizes
+// extremely long or empty outputs.
+func (a *App) score(modelID string, ntok, nchar int) float64 {
+	if nchar <= 0 {
+		return 0
+	}
+	ratio := float64(ntok) / float64(nchar)
+	if ratio <= 0 {
+		return 0
+	}
+	s := ratio * 100
+	if s > 100 {
+		s = 100
+	}
+	return s
 }
 
 // handleTestBatch launches each selected model in turn, sends a short test
@@ -2993,6 +3218,12 @@ func (a *App) runOneTestCore(bundleID, prompt string, maxTokens int, overrides m
 	}
 	a.hub.PublishLog(bundleID, "INFO",
 		fmt.Sprintf("🧪 [%s] 启动测试 (端口 %d)", b.Name, port))
+	// 取消检查：取消后不再启动新实例（避免后台继续逐个启动剩余的测试实例）
+	if isCancelled != nil && isCancelled() {
+		res.Status = "fail"
+		res.Error = "测试已取消"
+		return res
+	}
 	sess, err := a.launch(bundleID, port, params, true)
 	if err != nil {
 		res.Status = "fail"
@@ -3061,6 +3292,13 @@ func (a *App) runOneTestCore(bundleID, prompt string, maxTokens int, overrides m
 	if opts != nil && opts.Warmup {
 		stage("warming_up")
 		_, _ = a.testChatTiming(port, "你好", 4)
+	}
+	// 取消检查：实例就绪后、正式测量前若已取消则立即停止，不再发请求
+	if isCancelled != nil && isCancelled() {
+		a.stopRunner(sess.ID)
+		res.Status = "fail"
+		res.Error = "测试已取消"
+		return res
 	}
 	// 正式测量：同一实例内重复 N 次取平均（不额外启动模型，只加推理时间）
 	stage("benchmarking")
@@ -3435,6 +3673,7 @@ func (a *App) handleTestSweep(w http.ResponseWriter, r *http.Request) {
 		}
 		results := make([]sweepResult, 0, len(combos))
 		best, bestTPS := -1, 0.0
+		sweepStart := time.Now()
 		for i, ov := range combos {
 			if a.testJobCancelled(jobID) {
 				break
@@ -3473,6 +3712,7 @@ func (a *App) handleTestSweep(w http.ResponseWriter, r *http.Request) {
 				"load_ms": sr.LoadMS, "tps": sr.TPS, "tokens": sr.Tokens, "error": sr.Error,
 				"prompt_ps": sr.PromptPS, "prompt_ms": sr.PromptMS, "eval_ms": sr.EvalMS, "repeats": sr.Repeats,
 				"cached": sr.Cached, "vram_gb": sr.VRAMGB, "audit": sr.Audit,
+				"elapsed_ms": time.Since(sweepStart).Milliseconds(),
 			})
 			a.hub.Broadcast(data)
 		}
@@ -4273,6 +4513,8 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("POST /api/test/cancel", a.handleTestCancel)
 	mux.HandleFunc("GET /api/test/history", a.handleTestHistory)
 	mux.HandleFunc("DELETE /api/test/history", a.handleTestHistoryClear)
+	mux.HandleFunc("POST /api/test/history/save", a.handleTestHistorySave)
+	mux.HandleFunc("POST /api/tokenize", a.handleTokenize)
 	mux.HandleFunc("POST /api/sessions/{id}/stop", a.handleStop)
 	mux.HandleFunc("POST /api/sessions/{id}/restart", a.handleRestart)
 	mux.HandleFunc("POST /api/preview", a.handlePreview)
@@ -4285,7 +4527,12 @@ func (a *App) routes() http.Handler {
 	}
 	fileServer := http.FileServer(http.FS(webRoot))
 	// Fallback for everything not matched by the /api routes above.
-	mux.Handle("/", fileServer)
+	// 静态资源禁用缓存：前端 JS/CSS/HTML 改动后浏览器必须重新获取，避免加载旧版
+	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		w.Header().Set("Pragma", "no-cache")
+		fileServer.ServeHTTP(w, r)
+	}))
 	return logRequests(mux)
 }
 

@@ -62,6 +62,12 @@ Llama Launcher 是一个基于 Web 的图形化管理工具，为 [llama.cpp](ht
 ![主界面](docs/screenshots/main.png)
 *主界面：模型选择、参数配置、实时命令预览、运行实例与日志控制台（紫色主题）*
 
+![高级参数](docs/screenshots/params-advanced.png)
+*高级参数：专家级参数（KV 缓存、并行槽位、推理预算、反向提示词等）+ 实时命令预览*
+
+![参数悬停说明](docs/screenshots/param-hover.png)
+*参数说明：悬停任意参数即显示作用、推荐值与默认值*
+
 ![性能监控](docs/screenshots/monitor.png)
 *性能监控：KPI 指标卡、吞吐趋势图、每实例实时监控（输入/输出 token、速率、KV 占用）*
 
@@ -77,8 +83,14 @@ Llama Launcher 是一个基于 Web 的图形化管理工具，为 [llama.cpp](ht
 ![工具扩展 MCP](docs/screenshots/mcp.png)
 *工具扩展 MCP：模板库一键添加、健康检测、绑定模型*
 
-![批量测试与参数扫描](docs/screenshots/test.png)
-*批量测试与参数扫描：穷举寻优 / 智能寻优*
+![批量测试](docs/screenshots/test.png)
+*批量测试：多模型逐个启动、发送提示、自动收集吞吐与耗时*
+
+![参数扫描](docs/screenshots/test-sweep.png)
+*参数扫描：GPU 层数 / 上下文等组合穷举寻优 / 智能寻优*
+
+![测试历史](docs/screenshots/test-history.png)
+*测试历史：结果保存、对比导出、快照恢复*
 
 ![使用洞察](docs/screenshots/insights.png)
 *使用洞察：Token 统计、模型热度、吞吐仪表盘*

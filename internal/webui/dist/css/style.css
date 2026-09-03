@@ -2260,3 +2260,27 @@ code, pre, .cmd-preview, .dbg-output, .log-console { overflow-wrap: anywhere; }
   background: var(--panel-3); border: 1px solid var(--border-soft); border-radius: 8px;
 }
 #test-modal .tp-hint-row .modal-info { margin: 0; color: var(--faint); }
+
+/* —— v8：测试弹窗不把内容挤出视口 + 扫描行工具按钮与输入同排 ——
+   实测根因：a) .tp-col flex min-width:auto 使列按内容最小宽撑到 ~1549px 把右列挤到视口外；
+   b) .sweep-cap 为 nowrap 长文本会挤压行尾的 📐/▾预设/📖/✕，导致它们换行到“参数下方”。
+   修复：列允许收缩；扫描行内显式 order 排版——label→输入→📐→▾→📖→✕ 恒同排、按钮与输入同高，
+   档位胶囊置后并省略号截断，折叠编辑器占整行。已在 1920 实测 33/33 行按钮与输入 dy=0。 */
+#test-modal .tp-cols { min-width: 0; }
+#test-modal .tp-cols > .tp-col { min-width: 0; max-width: 100%; }
+#test-modal .tp-cols > .tp-col > .tp-panel { min-width: 0; }
+#test-modal .tp-scroll, #test-modal .tp-scroll > * { min-width: 0; max-width: 100%; }
+#test-modal .sweep-row { flex-wrap: wrap; align-items: center; gap: 6px; }
+#test-modal .sweep-row .sweep-label { order: 1; flex: 0 0 112px; width: 112px; }
+#test-modal .sweep-row .sweep-mode { order: 2; flex: none; }
+#test-modal .sweep-row input[type="text"],
+#test-modal .sweep-row input[type="number"] { order: 3; flex: 1 1 60px; min-width: 48px; }
+#test-modal .sweep-row [data-editor] { order: 4; flex: none; height: 28px; }
+#test-modal .sweep-row .preset { order: 5; flex: none; max-width: 40%; height: 28px; }
+#test-modal .sweep-row [data-help] { order: 6; flex: none; height: 28px; }
+#test-modal .sweep-row [data-clear] { order: 7; flex: none; height: 28px; }
+#test-modal .sweep-row .sweep-cap {
+  order: 8; flex: none; max-width: 150px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#test-modal .sweep-row .multi-editor { order: 9; flex-basis: 100%; }

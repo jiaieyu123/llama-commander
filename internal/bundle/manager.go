@@ -475,9 +475,9 @@ func (m *Manager) AddFromGGUF(path, name string, parseMetadata bool) (*Bundle, e
 // defaultParamsFrom derives sensible defaults from GGUF metadata.
 func defaultParamsFrom(info *gguf.ModelInfo) DefaultParams {
 	dp := DefaultParams{
-		LoadMode:  "mmap",
+		LoadMode:  "auto", // 官方默认：auto（mmap 除非设备不支持）
 		Samplers:  "penalties;dry;top_k;top_p;min_p;temperature",
-		FlashAttn: "on",
+		FlashAttn: "auto", // 官方默认：auto
 	}
 	if info != nil {
 		dp.CtxSize = int(info.ContextLength)

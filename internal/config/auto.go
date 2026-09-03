@@ -25,6 +25,15 @@ type HardwareInfo struct {
 	Backend     string   `json:"backend"` // cuda | vulkan | metal | cpu
 }
 
+// DraftSpec describes the draft model's spec and VRAM configuration.
+type DraftSpec struct {
+	ModelSpec
+	NGPULayers int    `json:"n_gpu_layers"`
+	CacheTypeK string `json:"cache_type_k"`
+	CacheTypeV string `json:"cache_type_v"`
+	CPUMoE     bool   `json:"cpu_moe"`
+}
+
 // DetectHardware probes the machine. On NVIDIA GPUs it shells out to
 // nvidia-smi; otherwise it falls back to CPU-only information.
 func DetectHardware(ctx context.Context) (*HardwareInfo, error) {
@@ -79,21 +88,20 @@ type Recommendation struct {
 
 // Recommend computes parameters for the requested scene preset.
 // scene ∈ {"speed", "context", "lowvram", "creative"}.
-func (h *HardwareInfo) Recommend(spec ModelSpec, scene string) *Recommendation {
+func (h *HardwareInfo) Recommend(spec ModelSpec, scene string, draft *DraftSpec) *Recommendation {
 	rec := &Recommendation{
 		Threads:   h.CPUCores,
 		LoadMode:  "mmap",
 		KVCacheK:  "f16",
 		KVCacheV:  "f16",
 		FlashAttn: "auto",
-		Parallel:  -1, // auto (llama 默认按并发自动分配槽位)
+		Parallel:  -1,
 	}
 	if spec.IsMoE && spec.NumExperts > 2 {
 		rec.CPUMoE = true
 		rec.Notes = append(rec.Notes, "检测到 MoE 模型，建议 --cpu-moe 节省显存")
 	}
 
-	// context
 	ctx := spec.ContextLength
 	if ctx == 0 {
 		ctx = 4096
@@ -122,8 +130,6 @@ func (h *HardwareInfo) Recommend(spec ModelSpec, scene string) *Recommendation {
 	}
 	rec.CtxSize = int(ctx)
 
-	// Vision projector: offloading mmproj steals VRAM from the main model. In
-	// speed/lowvram scenes suggest keeping it on the CPU instead (pure-text use).
 	mmprojCPU := false
 	if spec.MMProjSizeMB > 0 {
 		switch scene {
@@ -135,15 +141,61 @@ func (h *HardwareInfo) Recommend(spec ModelSpec, scene string) *Recommendation {
 	}
 	rec.MMProjCPU = mmprojCPU
 
-	// GPU layers
+	// ---- 草稿显存计算 ----
+	var draftVRAMGB float64
+	if draft != nil && draft.FileSizeMB > 0 {
+		draftVRAMGB = EstimateVRAMEx(draft.ModelSpec, draft.NGPULayers, rec.CtxSize, h, draft.CacheTypeK, draft.CacheTypeV, false)
+		rec.Notes = append(rec.Notes, fmt.Sprintf("草稿模型额外占用 %.1f GB 显存", draftVRAMGB))
+	}
+
 	if h.GPUCount > 0 && h.TotalVRAMMB > 0 {
-		rec.NGPULayers = h.estimateLayers(spec, ctx, scene, rec.KVCacheK, rec.KVCacheV, mmprojCPU)
-		rec.EstimatedVRAMGB = EstimateVRAMEx(spec, rec.NGPULayers, rec.CtxSize, h, rec.KVCacheK, rec.KVCacheV, mmprojCPU)
+		rec.NGPULayers = h.estimateLayersWithDraft(spec, ctx, scene, rec.KVCacheK, rec.KVCacheV, mmprojCPU, draftVRAMGB)
+		rec.EstimatedVRAMGB = EstimateVRAMEx(spec, rec.NGPULayers, rec.CtxSize, h, rec.KVCacheK, rec.KVCacheV, mmprojCPU) + draftVRAMGB
 	} else {
 		rec.NGPULayers = 0
 		rec.Notes = append(rec.Notes, "未检测到 GPU，将使用纯 CPU 推理")
 	}
+
+	if draft != nil && rec.NGPULayers == 0 {
+		rec.Notes = append(rec.Notes, "草稿模型在 CPU 上运行（主模型纯 CPU 模式）")
+	}
 	return rec
+}
+
+// estimateLayersWithDraft iterates candidate layer counts to find the largest
+// one that fits within available VRAM after deducting the draft model's VRAM
+// usage. Returns -1 if the model cannot be split (should stay on GPU), 0 if
+// nothing fits.
+func (h *HardwareInfo) estimateLayersWithDraft(spec ModelSpec, ctx uint64, scene, kvK, kvV string, mmprojCPU bool, draftVRAMGB float64) int {
+	if spec.BlockCount == 0 || spec.FileSizeMB <= 0 {
+		return -1
+	}
+	marginMB := 1536.0
+	if scene == "lowvram" {
+		marginMB = 2048.0
+	}
+	budget := float64(h.FreeVRAMMB)
+	if budget <= 0 {
+		budget = float64(h.TotalVRAMMB) - marginMB
+	}
+	budget -= marginMB
+	budget -= draftVRAMGB * 1024.0
+	if budget <= 0 {
+		return 0
+	}
+	best := 0
+	for l := uint64(0); l <= spec.BlockCount; l++ {
+		est := EstimateVRAMEx(spec, int(l), int(ctx), h, kvK, kvV, mmprojCPU)
+		if est*1024.0 <= budget {
+			best = int(l)
+		} else {
+			break
+		}
+	}
+	if best == int(spec.BlockCount) {
+		return -1
+	}
+	return best
 }
 
 // estimateLayers iterates candidate layer counts to find the largest one that

@@ -73,8 +73,11 @@ type GlobalConfig struct {
 // DefaultGlobalConfig returns sensible defaults.
 func DefaultGlobalConfig() *GlobalConfig {
 	return &GlobalConfig{
-		DataDir:          "data",
-		DefaultParams:    map[string]any{"ctx_size": 4096, "n_gpu_layers": 0, "flash_attn": "on"},
+		DataDir: "data",
+		// P0-1：不再强制注入 ctx_size/n_gpu_layers（官方默认 ctx=0=从模型加载、
+		// ngl 自动适配），flash_attn 用官方默认 "auto"。显式默认值会破坏
+		// llama.cpp 的 auto/fit 开箱即用路径，小显存设备还有 OOM 风险。
+		DefaultParams:    map[string]any{"flash_attn": "auto"},
 		LogRetentionDays: 30,
 	}
 }
@@ -796,7 +799,7 @@ func (a *App) handleMatchDraft(w http.ResponseWriter, r *http.Request) {
 				if arch == mainArch {
 					reason = "同架构 dspark/dflash 扩散草稿"
 				} else {
-					reason = "同系列 dspark/dflash 扩散草稿（跨架构扩散头）"
+					reason = "同系列 dspark/dflash 扩散草稿（跨架构；⚠️词表不匹配会启动报错，可手动改投机类型）"
 				}
 			} else if xFamily == mainFamily {
 				reason = "同系列模型（跨模型投机）"
@@ -968,7 +971,9 @@ func (a *App) handleAnalyze(w http.ResponseWriter, r *http.Request) {
 type importRequest struct {
 	Path string `json:"path"`
 	Name string `json:"name"`
-} // handleImport creates a bundle from a GGUF path (with smart bundling).
+}
+
+// handleImport creates a bundle from a GGUF path (with smart bundling).
 func (a *App) handleImport(w http.ResponseWriter, r *http.Request) {
 	var req importRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1037,8 +1042,48 @@ func (a *App) handleRecommend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	spec := modelSpecFromBundle(b)
-	rec := a.hw.Recommend(spec, req.Scene)
+
+	// 构建草稿规格
+	var draftSpec *config.DraftSpec
+	if b.DraftModel.Enabled && b.DraftModel.Path != "" {
+		if info, err := getDraftModelInfo(b.DraftModel.Path); err == nil {
+			draftSpec = &config.DraftSpec{
+				ModelSpec: config.ModelSpec{
+					FileSizeMB:      info.FileSizeMB,
+					BlockCount:      info.BlockCount,
+					ContextLength:   info.ContextLength,
+					HeadCountKV:     info.HeadCountKV,
+					EmbeddingLength: info.EmbeddingLength,
+					Architecture:    info.Architecture,
+					IsMoE:           info.IsMoE(),
+					NumExperts:      info.ExpertCount(),
+					MMProjSizeMB:    0,
+				},
+				NGPULayers: getIntParam(req.Params, "n_gpu_layers_draft", 0),
+				CacheTypeK: getStringParam(req.Params, "spec_draft_cache_type_k", "f16"),
+				CacheTypeV: getStringParam(req.Params, "spec_draft_cache_type_v", "f16"),
+			}
+		}
+	}
+
+	rec := a.hw.Recommend(spec, req.Scene, draftSpec)
 	audit := config.AuditConfig(req.Params, spec, a.hw)
+
+	if draftSpec != nil && rec.EstimatedVRAMGB > 0 {
+		freeGB := float64(a.hw.FreeVRAMMB) / 1024.0
+		if rec.EstimatedVRAMGB > freeGB {
+			audit = append(audit, config.AuditItem{
+				Level:   config.AuditError,
+				Message: fmt.Sprintf("启用投机解码后估算总显存 %.1f GB 超出可用显存 %.1f GB，请减少主模型或草稿的 GPU 层数", rec.EstimatedVRAMGB, freeGB),
+			})
+		} else if rec.EstimatedVRAMGB > freeGB*0.9 {
+			audit = append(audit, config.AuditItem{
+				Level:   config.AuditWarn,
+				Message: fmt.Sprintf("启用投机解码后估算总显存 %.1f GB 接近可用显存 %.1f GB，建议预留余量", rec.EstimatedVRAMGB, freeGB),
+			})
+		}
+	}
+
 	a.writeJSON(w, http.StatusOK, map[string]any{
 		"recommendation": rec,
 		"audit":          audit,
@@ -2220,9 +2265,18 @@ func (a *App) launch(bundleID string, port int, params map[string]any, allowSame
 	if port == 0 {
 		port = 8080
 	}
+	// P3：深拷贝参数，避免 buildArgs 的回填（草稿 n_max/p_min 等）污染调用方
+	// 的共享 map（handleRestart 复用的是持久化的 session.Params 引用）。
+	cp := cloneParams(params)
+	// P3：启动前友好校验草稿路径存在性，避免 llama-server 报晦涩错误。
+	if dp, ok := cp["model_draft"].(string); ok && strings.TrimSpace(dp) != "" {
+		if _, err := os.Stat(dp); err != nil {
+			return nil, fmt.Errorf("草稿模型文件不存在: %s", dp)
+		}
+	}
 	sess := a.sessions.Create(b.ID, "", a.cfg.BinaryPath, port)
-	sess.Params = params
-	sess.CmdlineArgs = a.buildArgs(b, params, port)
+	sess.Params = cp
+	sess.CmdlineArgs = a.buildArgs(b, cp, port)
 
 	// Wire stdout/stderr into the hub so logs stream to the UI.
 	pr, pw := io.Pipe()
@@ -2263,7 +2317,12 @@ func (a *App) launch(bundleID string, port int, params map[string]any, allowSame
 		}
 	}()
 	if err := runner.Start(); err != nil {
-		_ = a.sessions.Update(sess) // persist failure
+		// P0-4：启动失败必须回滚，否则残留 StatusStarting 会话会让
+		// PortInUse / BundleInUse 永久返回 true，重启 launcher 前无法再启动。
+		sess.Status = session.StatusStopped
+		now := time.Now().UTC().Format(time.RFC3339)
+		sess.EndTime = &now
+		_ = a.sessions.Update(sess)
 		return nil, err
 	}
 	sess.PID = runner.PID()
@@ -2312,7 +2371,9 @@ func (a *App) handleStop(w http.ResponseWriter, r *http.Request) {
 	_ = a.sessions.Update(ar.session)
 	a.hub.PublishLog(id, "INFO", "正在停止实例…")
 	go func() {
-		if err := ar.runner.Stop(8 * time.Second); err != nil {
+		// P2-13：已崩溃的实例点“停止”时 Kill() 会报 process already
+		// finished——这是正常情况而非失败，忽略它以免误导用户。
+		if err := ar.runner.Stop(8 * time.Second); err != nil && !isStopAlreadyDoneErr(err) {
 			a.hub.PublishLog(id, "ERROR", "停止失败: "+err.Error())
 			return
 		}
@@ -2544,6 +2605,10 @@ func (a *App) appendTestHistory(rec TestHistoryRecord) {
 	if len(auto) > 60 {
 		auto = auto[:60]
 	}
+	// P3：手动命名快照也设上限（默认保留最近 100 个），避免无限增长。
+	if len(kept) > 100 {
+		kept = kept[:100]
+	}
 	merged := make([]TestHistoryRecord, 0, len(kept)+len(auto))
 	merged = append(merged, kept...)
 	merged = append(merged, auto...)
@@ -2737,39 +2802,58 @@ type paramAudit struct {
 
 // tokenizeRequest is the body of POST /api/tokenize.
 type tokenizeRequest struct {
-	ModelID string `json:"model_id"`
-	Prompt  string `json:"prompt"`
-	MaxTok  int    `json:"max_tokens"`
+	SessionID string `json:"session_id"` // 优先：转发到运行中实例
+	ModelID   string `json:"model_id"`   // 备选：按模型找运行实例
+	Prompt    string `json:"prompt"`
+	MaxTok    int    `json:"max_tokens"`
 }
 
-// handleTokenize counts tokens in a prompt using the model's tokenizer. It
-// shells out to llama-server's /v1/tokenize endpoint on a local port, mirroring
-// the chat-completions measurement path. Returns token count and char count.
+// handleTokenize counts tokens in a prompt using a running llama-server's
+// /v1/tokenize endpoint. It never shells out to a phantom instance: it
+// forwards to the session given by session_id (preferred), or to whichever
+// running session currently serves req.ModelID. Returns token/char count.
 func (a *App) handleTokenize(w http.ResponseWriter, r *http.Request) {
 	var req tokenizeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	_, ok := a.bundles.Get(req.ModelID)
-	if !ok {
-		a.writeJSON(w, http.StatusNotFound, map[string]string{"error": "模型不存在"})
+	// P3：找到要转发到的运行实例。优先 session_id，其次 model_id。
+	var ar *activeRun
+	if req.SessionID != "" {
+		a.mu.Lock()
+		ar = a.runners[req.SessionID]
+		a.mu.Unlock()
+	}
+	if ar == nil && req.ModelID != "" {
+		a.mu.Lock()
+		for _, run := range a.runners {
+			if run.session.BundleID == req.ModelID {
+				ar = run
+				break
+			}
+		}
+		a.mu.Unlock()
+	}
+	if ar == nil {
+		a.writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "没有运行中的实例可供分词（请先启动模型，或在请求中携带 session_id）",
+		})
 		return
 	}
-	port := a.findFreePort(9300)
 	body, _ := json.Marshal(map[string]any{
 		"model":      "test",
 		"prompt":     req.Prompt,
 		"max_tokens": req.MaxTok,
 	})
 	req2, err := http.NewRequest(http.MethodPost,
-		fmt.Sprintf("http://127.0.0.1:%d/v1/tokenize", port), bytes.NewReader(body))
+		fmt.Sprintf("http://127.0.0.1:%d/v1/tokenize", ar.session.Port), bytes.NewReader(body))
 	if err != nil {
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 	req2.Header.Set("Content-Type", "application/json")
-	if key := a.effectiveAPIKey(); key != "" {
+	if key := a.sessionAPIKey(ar.session); key != "" {
 		req2.Header.Set("Authorization", "Bearer "+key)
 	}
 	resp, err := (&http.Client{Timeout: 90 * time.Second}).Do(req2)
@@ -3199,16 +3283,15 @@ func (a *App) runOneTestCore(bundleID, prompt string, maxTokens int, overrides m
 	if opts != nil && opts.Ctx > 0 {
 		baseCtx = opts.Ctx
 	}
+	// P0-7/P3：不再注入 load_mode=mmap（会破坏 auto 语义，部分后端直接失败）；
+	// threads:0 每次测试刷 n_threads < 1 警告、cache_type f16 为官方默认冗余——
+	// 一并移除让官方默认生效。flash_attn 用官方默认 auto。
 	params := map[string]any{
 		"ctx_size":     baseCtx,
 		"predict":      maxTokens,
 		"temperature":  0.1,
 		"n_gpu_layers": b.DefaultParams.NGPULayers,
-		"flash_attn":   "on",
-		"load_mode":    "mmap",
-		"threads":      0,
-		"cache_type_k": "f16",
-		"cache_type_v": "f16",
+		"flash_attn":   "auto",
 	}
 	for k, v := range overrides {
 		if v == nil {
@@ -4310,15 +4393,27 @@ func (a *App) handlePreview(w http.ResponseWriter, r *http.Request) {
 	if req.BundleID != "" {
 		if b, ok := a.bundles.Get(req.BundleID); ok {
 			chain.Merge(a.cfg.DefaultParams, a.modelDefaults(b, port), req.Params)
+			a.fixSamplerChain(chain) // P1-2：预览也展示修正后的采样链
 			args = chain.ArgList()
-			if cfgJSON, err := a.mcpCursorJSON(b); err == nil && cfgJSON != "" {
+			cfgJSON, err := a.mcpCursorJSON(b)
+			if err != nil {
+				// P3：MCP 配置解析失败不再静默忽略，记入日志便于排查。
+				log.Printf("preview: mcpCursorJSON(%s): %v", req.BundleID, err)
+			} else if cfgJSON != "" {
 				args = append(args, "--mcp-servers-json", cfgJSON)
 			}
 		}
 	}
 	if args == nil {
 		chain.Merge(a.cfg.DefaultParams, nil, req.Params)
+		a.fixSamplerChain(chain) // P1-2
 		args = chain.ArgList()
+	}
+	// P3：与 buildArgs 一致地注入全局加密 API Key（表单未显式提供时）。
+	if _, hasKey := req.Params["api_key"]; !hasKey && a.cfg.ServerAPIKeyEnc != "" {
+		if plain, err := secure.Decrypt(a.secretKeyPath, a.cfg.ServerAPIKeyEnc); err == nil && plain != "" {
+			args = append(args, "--api-key", plain)
+		}
 	}
 	a.writeJSON(w, http.StatusOK, map[string]any{
 		"args":  args,
@@ -4407,18 +4502,16 @@ func bundleIsMTP(b *bundle.Bundle) bool {
 	return false
 }
 
-// annotateMTP appends the "mtp" capability tag to each bundle's response copy
-// when its file embeds an MTP head, so the UI can surface the MTP group even
-// for bundles whose persisted tags predate tensor probing.
-func annotateMTP(list []*bundle.Bundle) []*bundle.Bundle {
-	out := make([]*bundle.Bundle, 0, len(list))
-	for _, b := range list {
-		if !bundleIsMTP(b) {
-			out = append(out, b)
-			continue
-		}
-		cp := *b
-		cp.Tags = append([]string{}, b.Tags...)
+// annotateBundleTags annotates a bundle's response copy with capability tags
+// (moe / vision / mtp) inferred from its metadata and companions. The original
+// bundle is left untouched; this returns a shallow copy so the API listing can
+// surface these tags to the UI for dynamic param visibility.
+func annotateBundleTags(b *bundle.Bundle) *bundle.Bundle {
+	cp := *b
+	cp.Tags = append([]string{}, b.Tags...)
+
+	// 1. MTP: probe GGUF tensor names (blk.*.nextn.*) when not already tagged.
+	if bundleIsMTP(b) {
 		has := false
 		for _, t := range cp.Tags {
 			if t == "mtp" {
@@ -4429,15 +4522,98 @@ func annotateMTP(list []*bundle.Bundle) []*bundle.Bundle {
 		if !has {
 			cp.Tags = append(cp.Tags, "mtp")
 		}
-		out = append(out, &cp)
+	}
+
+	// 2. MoE: infer from base model metadata (is_moe flag or expert_count).
+	if b.BaseModel.Metadata != nil && (b.BaseModel.Metadata.IsMoE() || b.BaseModel.Metadata.ExpertCount() > 0) {
+		has := false
+		for _, t := range cp.Tags {
+			if t == "moe" {
+				has = true
+				break
+			}
+		}
+		if !has {
+			cp.Tags = append(cp.Tags, "moe")
+		}
+	}
+
+	// 3. Vision: bound mmproj companion OR vision markers in base model metadata.
+	if b.MMProj.Path != "" || hasVisionMetadata(b.BaseModel.Metadata) {
+		has := false
+		for _, t := range cp.Tags {
+			if t == "vision" {
+				has = true
+				break
+			}
+		}
+		if !has {
+			cp.Tags = append(cp.Tags, "vision")
+		}
+	}
+
+	return &cp
+}
+
+// hasVisionMetadata heuristically detects vision capability from base model
+// metadata keys/values (architecture names like llava/qwen2-vl, or mmproj
+// related tensor markers).
+func hasVisionMetadata(meta *gguf.ModelInfo) bool {
+	if meta == nil {
+		return false
+	}
+	for key := range meta.Metadata {
+		k := strings.ToLower(key)
+		if strings.Contains(k, "vision") || strings.Contains(k, "mmproj") ||
+			strings.Contains(k, "vit") || strings.Contains(k, "clip") {
+			return true
+		}
+	}
+	arch := strings.ToLower(meta.Architecture)
+	for _, a := range []string{"llava", "qwen2-vl", "mllama", "moondream"} {
+		if arch == a || strings.Contains(arch, a) {
+			return true
+		}
+	}
+	return false
+}
+
+// annotateMTP appends the "mtp" capability tag to each bundle's response copy
+// when its file embeds an MTP head. Kept for callers that only need MTP.
+func annotateMTP(list []*bundle.Bundle) []*bundle.Bundle {
+	out := make([]*bundle.Bundle, 0, len(list))
+	for _, b := range list {
+		out = append(out, annotateBundleTags(b))
 	}
 	return out
 }
 
 // buildArgs resolves the final CLI arguments for a launch.
 func (a *App) buildArgs(b *bundle.Bundle, params map[string]any, port int) []string {
+	// 回填草稿参数
+	if b.DraftModel.Enabled && len(b.DraftModel.SpecParams) > 0 {
+		keyMap := map[string]string{
+			"n_max":   "spec_draft_n_max",
+			"n_min":   "spec_draft_n_min",
+			"p_split": "spec_draft_p_split",
+			"p_min":   "spec_draft_p_min",
+		}
+		for k, v := range b.DraftModel.SpecParams {
+			regKey, ok := keyMap[k]
+			if !ok {
+				continue
+			}
+			// P1-10：用户清空某字段（意图用官方默认）也应触发回填；
+			// 原判断 !exists 会把“空串=用户想用官方默认 3”误当成已设置。
+			if cur, exists := params[regKey]; !exists || cur == nil || cur == "" {
+				params[regKey] = v
+			}
+		}
+	}
+
 	chain := config.NewChain(a.registry)
 	chain.Merge(a.cfg.DefaultParams, a.modelDefaults(b, port), params)
+	a.fixSamplerChain(chain) // P1-2：Mirostat/Adaptive-P 需位于采样链尾才生效
 	args := chain.ArgList()
 	// 把绑定到该 bundle 的 MCP 服务器转换为 Cursor 格式内联注入
 	// （llama.cpp 用 --mcp-servers-json，不是 --mcp）
@@ -4636,4 +4812,143 @@ func runParse(args []string) {
 		"file_type":        gguf.FileTypeName(info.FileType),
 		"metadata_keys":    len(info.RawKeys),
 	})
+}
+
+// ---- 辅助函数 ----
+// fixSamplerChain ensures Mirostat / Adaptive-P sampling really take effect:
+// llama.cpp requires the matching sampler to be present in the samplers chain
+// (and at the end), and both are mutually exclusive with top_k/top_p/typical.
+// The correction is idempotent and runs after level merging so it also covers
+// scan/test launches (P1-2).
+func (a *App) fixSamplerChain(c *config.Chain) {
+	miro := numParam(c.Value("mirostat"))
+	adap := numParam(c.Value("adaptive_target"))
+	if miro == 0 && adap <= 0 {
+		return
+	}
+	chainStr, _ := c.Value("samplers").(string)
+	if strings.TrimSpace(chainStr) == "" {
+		chainStr = "penalties;dry;top_n_sigma;top_k;typ_p;top_p;min_p;xtc;temperature"
+	}
+	raw := strings.FieldsFunc(chainStr, func(r rune) bool { return r == ';' || r == ',' || r == ' ' })
+	seen := map[string]bool{}
+	out := make([]string, 0, len(raw))
+	for _, s := range raw {
+		s = strings.TrimSpace(s)
+		if s == "" || seen[s] {
+			continue
+		}
+		// 互斥项：Mirostat 激活时忽略 top_k/top_p/typical；Adaptive-P 同理
+		if miro != 0 && (s == "top_k" || s == "top_p" || s == "typical" || s == "mirostat") {
+			continue
+		}
+		if adap > 0 && s == "adaptive_p" {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	if miro != 0 && !seen["mirostat"] {
+		out = append(out, "mirostat")
+	}
+	if adap > 0 && !seen["adaptive_p"] {
+		out = append(out, "adaptive_p")
+	}
+	c.Set("samplers", strings.Join(out, ";"), config.LevelSession)
+}
+
+// numParam coerces int/float64/string numbers to float64 for numeric params.
+func numParam(v any) float64 {
+	switch t := v.(type) {
+	case int:
+		return float64(t)
+	case int64:
+		return float64(t)
+	case float64:
+		return t
+	case float32:
+		return float64(t)
+	case string:
+		f, _ := strconv.ParseFloat(strings.TrimSpace(t), 64)
+		return f
+	}
+	return 0
+}
+
+// cloneParams deep-copies a string-keyed value map so downstream in-place
+// edits (e.g. buildArgs' draft-param backfill) never mutate the caller's map
+// (notably handleRestart, which reuses the persisted session params).
+func cloneParams(src map[string]any) map[string]any {
+	if src == nil {
+		return map[string]any{}
+	}
+	dst := make(map[string]any, len(src))
+	for k, v := range src {
+		dst[k] = cloneValue(v)
+	}
+	return dst
+}
+
+func cloneValue(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		m := make(map[string]any, len(x))
+		for k, val := range x {
+			m[k] = cloneValue(val)
+		}
+		return m
+	case []any:
+		s := make([]any, len(x))
+		for i, val := range x {
+			s[i] = cloneValue(val)
+		}
+		return s
+	default:
+		return v
+	}
+}
+
+// isStopAlreadyDoneErr reports whether a Stop error just means the process
+// already exited (a crash-card “stop” click hits this case). Treating it as
+// failure would mislead the user into thinking the stop didn't work.
+func isStopAlreadyDoneErr(err error) bool {
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "already finished") ||
+		strings.Contains(s, "not running") ||
+		strings.Contains(s, "no such process")
+}
+
+func getIntParam(m map[string]any, key string, def int) int {
+	if v, ok := m[key]; ok {
+		if n, ok := v.(int); ok {
+			return n
+		}
+		if f, ok := v.(float64); ok {
+			return int(f)
+		}
+	}
+	return def
+}
+
+func getStringParam(m map[string]any, key, def string) string {
+	if v, ok := m[key]; ok {
+		if s, ok := v.(string); ok && s != "" {
+			return s
+		}
+	}
+	return def
+}
+
+var draftInfoCache sync.Map
+
+func getDraftModelInfo(path string) (*gguf.ModelInfo, error) {
+	if v, ok := draftInfoCache.Load(path); ok {
+		return v.(*gguf.ModelInfo), nil
+	}
+	info, err := gguf.Parse(path)
+	if err != nil {
+		return nil, err
+	}
+	draftInfoCache.Store(path, info)
+	return info, nil
 }

@@ -62,7 +62,7 @@ var paramGuidance = map[string]ParamGuidance{
 	},
 	"fit": {
 		Description:    "自动适配显存：启动时按空闲显存自动调整上下文/层数等。开启后配合 fit-target/fit-ctx。",
-		Recommendation: "一般不开启，用一键优化更精确",
+		Recommendation: "on（官方默认，自动适配显存）或 off（手动控制）",
 		Related:        []string{"fit_target", "fit_ctx"},
 	},
 	"threads": {
@@ -76,8 +76,8 @@ var paramGuidance = map[string]ParamGuidance{
 		Related:        []string{"threads"},
 	},
 	"ctx_size": {
-		Description:    "上下文长度（token）。越大占用显存/内存越多。默认 4096；长对话或长文档可加大（如 8192/16384）。",
-		Recommendation: "4096（标准）或 8192（长对话）或 16384（长文档）",
+		Description:    "上下文长度（token）。越大占用显存/内存越多。留空 = 模型默认（0，按模型加载）；长对话或长文档可加大（如 8192/16384）。",
+		Recommendation: "模型默认 或 8192（长对话）/ 16384（长文档）",
 		Related:        []string{"n_gpu_layers", "cache_type_k", "cache_type_v"},
 	},
 	"batch_size": {
@@ -92,7 +92,7 @@ var paramGuidance = map[string]ParamGuidance{
 	},
 	"flash_attn": {
 		Description:    "Flash Attention 加速：on=强制开、off=关闭、auto=自动。开启可省显存并提速；量化 KV 缓存（非 f16）强烈建议保持 on。",
-		Recommendation: "on（推荐）",
+		Recommendation: "auto（官方默认）或 on（量化 KV 时）",
 		Related:        []string{"cache_type_k", "cache_type_v"},
 	},
 	"cache_type_k": {
@@ -149,18 +149,18 @@ var paramGuidance = map[string]ParamGuidance{
 
 	// ── 🧠 内存与加载 ───────────────────────────────────────
 	"load_mode": {
-		Description:    "模型加载模式。✅ 推荐：mmap（默认，启动快且省内存）。mlock=锁定到 RAM 防换页（模型被系统换出导致变慢时用，但会占满物理内存）；mmap+mlock=两者结合；dio=直接 IO；none=一次性读入（最慢）。内存特别紧张才考虑 none。",
-		Recommendation: "mmap（默认）",
+		Description:    "模型加载模式。✅ 推荐：auto（官方默认，自动选 mmap 等）。mlock=锁定到 RAM 防换页（模型被系统换出导致变慢时用，但会占满物理内存）；mmap+mlock=两者结合；dio=直接 IO；none=一次性读入（最慢）。内存特别紧张才考虑 none。",
+		Recommendation: "auto（官方默认）或 mmap（不支持的设备回退 none/mmap）",
 		Related:        []string{"no_host", "repack"},
 	},
 	"kv_offload": {
-		Description:    "KV 缓存卸载到 GPU，加速长上下文。✅ 推荐：显存充足时开启，显存紧张保持关闭（默认关闭）。",
-		Recommendation: "off（默认）或 on（显存充足）",
+		Description:    "KV 缓存卸载到 GPU，加速长上下文。✅ 推荐：设备支持时默认开启；显存紧张可显式关闭（-nkvo）。",
+		Recommendation: "on（默认）或 off（显存紧张时关闭）",
 		Related:        []string{"n_gpu_layers", "ctx_size"},
 	},
 	"repack": {
 		Description:    "权重重打包：启动时重排低效数据类型以提升算力利用率。✅ 推荐：CUDA 卡开启（略增启动时间）；纯 CPU 推理可关闭。",
-		Recommendation: "on（CUDA）或 off（CPU）",
+		Recommendation: "on（默认）或 off（纯 CPU / 极慢加载时）",
 		Related:        []string{},
 	},
 	"no_host": {
@@ -174,8 +174,8 @@ var paramGuidance = map[string]ParamGuidance{
 		Related:        []string{},
 	},
 	"op_offload": {
-		Description:    "把张量运算（如归一化）也卸载到设备。✅ 推荐：保持关闭（默认），一般不需要开启。",
-		Recommendation: "off（默认）",
+		Description:    "把张量运算（如归一化）也卸载到设备。官方默认开启（设备支持时）；带宽受限可关闭。",
+		Recommendation: "on（默认）或 off",
 		Related:        []string{},
 	},
 	"cache_ram": {
@@ -195,7 +195,7 @@ var paramGuidance = map[string]ParamGuidance{
 	},
 	"keep": {
 		Description:    "保留初始 prompt 的前 N 个 token 不被上下文截断丢弃（长对话保护关键指令）。默认 0。",
-		Recommendation: "0（不保留）或 48（保留系统提示）",
+		Recommendation: "0（默认）/ -1 全部保留 / 48（保留系统提示）",
 		Related:        []string{"ctx_size"},
 	},
 	"grp_attn_n": {
@@ -373,13 +373,13 @@ var paramGuidance = map[string]ParamGuidance{
 		Related:        []string{},
 	},
 	"adaptive_target": {
-		Description:    "Adaptive-P 目标熵（0-1，0=禁用）：动态调整 top_p 使输出熵接近目标。",
-		Recommendation: "0（禁用）",
+		Description:    "Adaptive-P 目标捕获概率（0.0~0.99，负值=禁用）：动态调整 top_p。默认 -1.00（禁用）。",
+		Recommendation: "-1.00（禁用，默认）或 0.55 / 0.65",
 		Related:        []string{"adaptive_decay"},
 	},
 	"adaptive_decay": {
-		Description:    "Adaptive-P 衰减系数（0=禁用）：控制 top_p 调整速度。",
-		Recommendation: "0（禁用）",
+		Description:    "Adaptive-P 衰减系数（0.0~0.99，默认 0.90）：控制 top_p 调整速度。",
+		Recommendation: "0.90（默认）",
 		Related:        []string{"adaptive_target"},
 	},
 	"typical": {
@@ -460,8 +460,8 @@ var paramGuidance = map[string]ParamGuidance{
 
 	// ── 🧩 投机解码 ─────────────────────────────────────────
 	"spec_type": {
-		Description:    "投机解码类型：draft-simple=独立小草稿模型、draft-eagle3=EAGLE-3、draft-mtp=多 token 预测（主模型自带 MTP 头时直接用，如 Qwen3-MTP/Qwopus-MTP）、draft-dflash/draft-dspark=扩散式草稿、ngram-*=无模型 n-gram 草稿。用小模型或专用头预猜输出，大幅提速。",
-		Recommendation: "draft-mtp（MTP 模型）或 draft-simple（外部草稿）",
+		Description:    "投机解码类型（逗号可组合多类型，默认 none=关闭）：none=关闭、draft-simple=独立小草稿模型、draft-eagle3=EAGLE-3、draft-mtp=多 token 预测（主模型自带 MTP 头时直接用，如 Qwen3-MTP/Qwopus-MTP）、draft-dflash/draft-dspark=扩散式草稿、ngram-*=无模型 n-gram 草稿。用小模型或专用头预猜输出，大幅提速。",
+		Recommendation: "draft-mtp（MTP 模型）/ draft-simple（外部草稿）/ ngram-*（免草稿）",
 		Related:        []string{"model_draft", "n_gpu_layers_draft"},
 	},
 	"model_draft": {
@@ -490,7 +490,7 @@ var paramGuidance = map[string]ParamGuidance{
 		Related:        []string{"spec_draft_cpu_mask"},
 	},
 	"spec_draft_prio_batch": {
-		Description:    "草稿模型批处理阶段优先级（-1..3）。",
+		Description:    "草稿模型批处理阶段优先级（0..3，官方无 -1 档）。",
 		Recommendation: "0（默认）",
 		Related:        []string{"spec_draft_prio"},
 	},
@@ -505,7 +505,7 @@ var paramGuidance = map[string]ParamGuidance{
 		Related:        []string{"spec_draft_cpu_mask_batch"},
 	},
 	"spec_draft_prio": {
-		Description:    "草稿模型进程优先级（-1~3）。",
+		Description:    "草稿模型进程优先级（0~3，官方无 -1 档）。",
 		Recommendation: "0（默认）",
 		Related:        []string{"spec_draft_prio_batch"},
 	},
@@ -545,17 +545,17 @@ var paramGuidance = map[string]ParamGuidance{
 		Related:        []string{},
 	},
 	"spec_ngram_mod_n_min": {
-		Description:    "ngram-mod 的 n 最小（默认 0）。",
+		Description:    "ngram-mod 的 n 最小（默认 48）。",
 		Recommendation: "0（默认）",
 		Related:        []string{"spec_ngram_mod_n_max"},
 	},
 	"spec_ngram_mod_n_max": {
-		Description:    "ngram-mod 的 n 最大（默认 4）。",
+		Description:    "ngram-mod 的 n 最大（默认 64）。",
 		Recommendation: "4（默认）",
 		Related:        []string{"spec_ngram_mod_n_min"},
 	},
 	"spec_ngram_simple_size_n": {
-		Description:    "ngram-simple 的 n-gram 长度（默认 4）。",
+		Description:    "ngram-simple 的 n-gram 长度（默认 12）。",
 		Recommendation: "4（默认）",
 		Related:        []string{"spec_ngram_simple_size_m"},
 	},
@@ -570,7 +570,7 @@ var paramGuidance = map[string]ParamGuidance{
 		Related:        []string{"lookup_cache_static"},
 	},
 	"spec_ngram_simple_size_m": {
-		Description:    "ngram-simple 的查询长度（默认 4）。",
+		Description:    "ngram-simple 的查询长度（默认 48）。",
 		Recommendation: "4（默认）",
 		Related:        []string{"spec_ngram_simple_size_n"},
 	},
@@ -666,18 +666,18 @@ var paramGuidance = map[string]ParamGuidance{
 		Related:        []string{"reasoning_effort", "reasoning_format"},
 	},
 	"reasoning_format": {
-		Description:    "思维链输出格式：auto/thought/deepseek/qwen。默认 auto 跟随模型。",
+		Description:    "思维链输出格式：auto/none/deepseek/deepseek-legacy。默认 auto；none=思维标签留在 content。",
 		Recommendation: "auto（默认）",
 		Related:        []string{"reasoning"},
 	},
 	"reasoning_effort": {
-		Description:    "推理努力级别（low/medium/high）：越高思考越久、答案越好但更慢。",
+		Description:    "推理努力级别（default/minimal/low/medium/high/xhigh/max）：越高思考越久、答案越好但更慢。",
 		Recommendation: "medium（平衡）或 high（质量）",
 		Related:        []string{"reasoning"},
 	},
 	"reasoning_budget": {
-		Description:    "思维链 token 预算（0=不限制）。限制思考长度用。",
-		Recommendation: "0（不限制）或 2048",
+		Description:    "思维链 token 预算：-1=不限制（默认）、0=立即结束、N>0=预算上限。限制思考长度用。",
+		Recommendation: "-1（不限制，默认）或 1024/2048（限制思考）",
 		Related:        []string{"reasoning"},
 	},
 
@@ -1086,7 +1086,7 @@ var paramGuidance = map[string]ParamGuidance{
 		Related:        []string{"metrics"},
 	},
 	"sse_ping_interval": {
-		Description:    "SSE 流式响应的心跳间隔秒数（默认 30）。流式输出时定期发送 ping 保持连接，防止代理/防火墙把空闲连接断开。调小更稳但产生更多空消息。",
+		Description:    "SSE 流式响应的心跳间隔秒数（默认 30，-1=禁用心跳）。流式输出时定期发送 ping 保持连接，防止代理/防火墙把空闲连接断开。调小更稳但产生更多空消息。",
 		Recommendation: "代理频繁断流可调小到 5-10",
 		Related:        []string{"timeout"},
 	},
@@ -1207,8 +1207,8 @@ var paramGuidance = map[string]ParamGuidance{
 		Related:        []string{"chat_template"},
 	},
 	"prefill_assistant": {
-		Description:    "预填充助手回复片段（--prefill-assistant）。构造对话时预先注入一段助手文本，引导模型续写的风格/内容，如预设固定开场白或系统回复。",
-		Recommendation: "默认关闭",
+		Description:    "助手回复预填充（--prefill-assistant）：官方默认会预填充助手前缀以引导续写；发射本参数表示“不预填充”，把最后一条 assistant 消息当作完整消息。",
+		Recommendation: "保持默认（预填充开启）；勾选 = 禁用预填充",
 		Related:        []string{"chat_template"},
 	},
 	"reasoning_preserve": {

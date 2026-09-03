@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"sync"
 	"time"
@@ -52,7 +53,10 @@ func (r *Runner) Start() error {
 	}
 	cmd := exec.Command(bin, r.opts.Args...)
 	cmd.Dir = r.opts.WorkDir
-	cmd.Env = append(cmd.Env, r.opts.Env...)
+	// 继承父进程完整环境再叠加自定义变量。注意：cmd.Env 初始为 nil，
+	// 若直接 append(cmd.Env, ...) 会让子进程只剩自定义项（丢失 PATH/
+	// SYSTEMROOT 等），配置了 cache_dir 时大概率启动失败（P0-3）。
+	cmd.Env = append(os.Environ(), r.opts.Env...)
 	if r.opts.Stdout != nil {
 		cmd.Stdout = r.opts.Stdout
 	}

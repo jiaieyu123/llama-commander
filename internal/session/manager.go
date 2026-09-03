@@ -145,7 +145,12 @@ func (m *Manager) save(s *Session) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, s.ID+".json"), data, 0o644)
+	// P3：先写临时文件再 rename，避免进程崩溃时直接写坏会话 JSON。
+	tmp := filepath.Join(dir, s.ID+".json.tmp")
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, filepath.Join(dir, s.ID+".json"))
 }
 
 // RunningCount returns how many sessions are currently active.

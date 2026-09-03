@@ -50,19 +50,41 @@ func DetectCompanions(basePath string) CompanionHints {
 	if err != nil {
 		return hints
 	}
+	// 获取主模型文件大小
+	var baseSize int64
+	if fi, err := os.Stat(basePath); err == nil {
+		baseSize = fi.Size()
+	}
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(strings.ToLower(e.Name()), ".gguf") {
 			continue
 		}
+		fullPath := filepath.Join(dir, e.Name())
+		if fullPath == basePath {
+			continue
+		}
 		switch classifyCompanion(e.Name()) {
 		case "mmproj":
-			hints.MMProj = filepath.Join(dir, e.Name())
+			hints.MMProj = fullPath
 		case "draft":
 			if hints.Draft == "" {
-				hints.Draft = filepath.Join(dir, e.Name())
+				hints.Draft = fullPath
 			}
 		case "lora":
-			hints.LORA = append(hints.LORA, filepath.Join(dir, e.Name()))
+			hints.LORA = append(hints.LORA, fullPath)
+		default:
+			// 文件名无关键字：检查文件大小是否明显小于主模型
+			if baseSize > 0 {
+				fi, err := os.Stat(fullPath)
+				if err == nil && !fi.IsDir() {
+					size := fi.Size()
+					if size < baseSize/3 && size < 2*1024*1024*1024 {
+						if hints.Draft == "" {
+							hints.Draft = fullPath
+						}
+					}
+				}
+			}
 		}
 	}
 	return hints
@@ -112,7 +134,7 @@ func applyCompanions(b *Bundle, hints CompanionHints) {
 			Enabled:  true,
 			SpecType: "draft-simple",
 			SpecParams: map[string]any{
-				"n_max":   3,
+				"n_max":   16, // 与 registry 默认值保持一致
 				"n_min":   0,
 				"p_split": 0.10,
 				"p_min":   0.00,

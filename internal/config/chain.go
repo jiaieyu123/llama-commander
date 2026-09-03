@@ -145,17 +145,73 @@ func (c *Chain) ArgList() []string {
 			continue
 		}
 		if !d.RequiresValue {
-			// Pure boolean flag: emit only when explicitly enabled. This keeps
-			// unchecked checkboxes (which flow in as false) from emitting flags.
-			if b, ok := pv.Value.(bool); ok && b {
-				args = append(args, flag)
+			// Pure boolean flag:
+			//   - bool=true  → 发射正向 flag（显式开启）
+			//   - bool=false → 若该参数定义了 NegFlag，发射负向旗标以真正
+			//     关闭官方“默认 enabled”的开关；否则不发射（跟随官方默认）
+			if b, ok := pv.Value.(bool); ok {
+				if b {
+					args = append(args, flag)
+				} else if d.NegFlag != "" {
+					args = append(args, d.NegFlag)
+				}
 			}
 			continue
 		}
+		// 值为空串/空数组的可选参数（"" 表示“跟随官方默认”）不发射，
+		// 防止把空串当成非法枚举值传给 llama-server（如 --spec-type ""）。
+		if isEmptyArgValue(pv.Value) {
+			continue
+		}
 		args = append(args, flag)
+		if d.Kind == KindMulti {
+			// 多选设备类参数需逗号拼接后单次发射（官方 <dev1,dev2,..>），
+			// 而不是经 %v 输出成 [GPU0 GPU1] 之类的非法值。
+			if joined, ok := joinMulti(pv.Value); ok {
+				args = append(args, joined)
+			}
+			continue
+		}
 		args = append(args, formatValue(pv.Value))
 	}
 	return args
+}
+
+// isEmptyArgValue reports whether a resolved value should be treated as
+// "unset" and therefore skipped during emission.
+func isEmptyArgValue(v any) bool {
+	switch x := v.(type) {
+	case nil:
+		return true
+	case string:
+		return x == ""
+	case []string:
+		return len(x) == 0
+	case []any:
+		return len(x) == 0
+	}
+	return false
+}
+
+// joinMulti renders a KindMulti value as the official comma-separated list.
+func joinMulti(v any) (string, bool) {
+	switch x := v.(type) {
+	case []string:
+		if len(x) == 0 {
+			return "", false
+		}
+		return strings.Join(x, ","), true
+	case []any:
+		if len(x) == 0 {
+			return "", false
+		}
+		parts := make([]string, 0, len(x))
+		for _, e := range x {
+			parts = append(parts, fmt.Sprintf("%v", e))
+		}
+		return strings.Join(parts, ","), true
+	}
+	return "", false
 }
 
 // CommandLine returns a single-line string for preview.

@@ -1101,6 +1101,42 @@ func (a *App) handleRecommend(w http.ResponseWriter, r *http.Request) {
 }
 
 // modelSpecFromBundle converts a bundle into the config engine's ModelSpec.
+// budgetDimsRequest is the body of POST /api/budget/dims.
+type budgetDimsRequest struct {
+	BundleID string `json:"bundle_id"`
+}
+
+// handleBudgetDims re-parses the model's GGUF file and returns the authoritative
+// per-layer KV-cache structure (KV bytes per token) derived from the file's own
+// metadata following llama.cpp semantics — no guessing, no fallback tables.
+func (a *App) handleBudgetDims(w http.ResponseWriter, r *http.Request) {
+	var req budgetDimsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	b, ok := a.bundles.Get(req.BundleID)
+	if !ok {
+		a.writeJSON(w, http.StatusNotFound, map[string]string{"error": "bundle not found"})
+		return
+	}
+	path := b.BaseModel.Path
+	if path == "" {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "模型没有 GGUF 文件路径"})
+		return
+	}
+	info, err := gguf.Parse(path)
+	if err != nil {
+		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "解析 GGUF 失败: " + err.Error()})
+		return
+	}
+	shape := gguf.KVShapeFromMetadata(info.Metadata)
+	a.writeJSON(w, http.StatusOK, map[string]any{
+		"shape": shape,
+		"path":  path,
+	})
+}
+
 func modelSpecFromBundle(b *bundle.Bundle) config.ModelSpec {
 	spec := config.ModelSpec{
 		FileSizeMB:   b.BaseModel.FileSizeMB,
@@ -2343,6 +2379,40 @@ func (a *App) launch(bundleID string, port int, params map[string]any, allowSame
 		a.mu.Unlock()
 		a.hub.PublishLog(sess.ID, "WARN", "进程已退出")
 	}()
+
+	// 启动后预热（异步，不阻塞返回）：等模型 /health 就绪后发一次极小请求，
+	// 一次性触发 CUDA kernel / KV 池 / cuBLAS workspace 等初始化开销，
+	// 让用户的第一个真实请求显著更快（首请求通常偏慢）。
+	{
+		port := sess.Port
+		sid := sess.ID
+		go func() {
+			deadline := time.Now().Add(180 * time.Second)
+			for time.Now().Before(deadline) {
+				if !a.isRunning(sid) {
+					return
+				}
+				resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/health", port))
+				if err == nil {
+					resp.Body.Close()
+					if resp.StatusCode == http.StatusOK {
+						break
+					}
+				}
+				time.Sleep(2 * time.Second)
+			}
+			if !a.isRunning(sid) {
+				return
+			}
+			a.hub.PublishLog(sid, "INFO", "🧊 预热中（触发 CUDA/KV 初始化，首请求会更快）…")
+			_, err := a.testChatTiming(port, "你好", 4)
+			if err != nil {
+				a.hub.PublishLog(sid, "WARN", "预热请求失败: "+err.Error())
+				return
+			}
+			a.hub.PublishLog(sid, "INFO", "✅ 预热完成")
+		}()
+	}
 	return sess, nil
 }
 
@@ -4588,8 +4658,82 @@ func annotateMTP(list []*bundle.Bundle) []*bundle.Bundle {
 	return out
 }
 
+// draftSpecNeedsExternal reports whether a speculative-decoding type consumes
+// an external draft-model file (--model-draft). ngram-* types derive drafts
+// from the main model, and draft-mtp for a main model that carries its own MTP
+// head is handled without a draft file (see modelDefaults), so neither needs one.
+func draftSpecNeedsExternal(specType string) bool {
+	switch specType {
+	case "draft-mtp", "draft-simple", "draft-eagle3", "draft-dflash", "draft-dspark":
+		return true
+	}
+	return false
+}
+
+// resolveDraftModel returns a usable draft-model path for the bundle, or ""
+// if none is available. It prefers the bound companion draft (DraftModel.Path)
+// when the file still exists, then falls back to same-directory companion
+// detection — mirroring resolveMMProj so a stale/absent binding never blocks a
+// speculative launch.
+func (a *App) resolveDraftModel(b *bundle.Bundle) string {
+	if b.DraftModel.Enabled && b.DraftModel.Path != "" {
+		if fi, err := os.Stat(b.DraftModel.Path); err == nil && !fi.IsDir() {
+			return b.DraftModel.Path
+		}
+	}
+	hints := bundle.DetectCompanions(b.BaseModel.Path)
+	if hints.Draft != "" {
+		if fi, err := os.Stat(hints.Draft); err == nil && !fi.IsDir() {
+			return hints.Draft
+		}
+	}
+	return ""
+}
+
 // buildArgs resolves the final CLI arguments for a launch.
 func (a *App) buildArgs(b *bundle.Bundle, params map[string]any, port int) []string {
+	// P0-draft：用户显式选择了“需要外部草稿模型”的投机类型（draft-mtp / draft-simple 等）
+	// 却没填“独立草稿模型”时，自动用 bundle 已绑定草稿兜底；未绑定则按命名规则探测
+	// 同目录伴生草稿。否则 llama.cpp 收不到 --model-draft：
+	//   - draft-mtp 会退化为对主模型建 MTP context → “model doesn't contain MTP layers” 崩溃；
+	//   - 其它 draft-* 类型同样无法跑投机。
+	// 主模型自带 MTP 头（bundleIsMTP，如 Ornith）时 draft-mtp 不需要外部草稿，跳过。
+	// 探测到 MTP 头草稿时必须配 draft-mtp（draft-simple 会让 MTP 草稿投机解码崩溃），
+	// 故用户选 draft-simple/留空而草稿带 MTP 头时自动纠正为 draft-mtp。
+	// P0-draft：统一“草稿自带投机类型”裁决（主模型无自带 MTP 头时）。
+	// 草稿的 MTP 头（HasMTPHeadByFile 探测 blk.*.nextn.*）决定它必须用哪种投机类型：
+	//   - MTP 头草稿（mtp-*.gguf）→ 只能 draft-mtp（draft-simple 会让 MTP 草稿投机崩）；
+	//   - 普通草稿 → draft-simple / draft-eagle3 等。
+	// 覆盖三条入口：
+	//   1) 用户/前端只填草稿路径（spec_type 留空=自动）→ 按草稿 MTP 头自动定类型；
+	//   2) 用户显式选 draft-* 但没填草稿 → 自动从 bundle/同目录补草稿路径；
+	//   3) 用户填了 MTP 草稿却把类型配成 draft-simple → 自动纠正为 draft-mtp。
+	// 显式 spec_type=none（关闭投机）或主模型自带 MTP（bundleIsMTP）时不介入。
+	if !bundleIsMTP(b) {
+		specType, _ := params["spec_type"].(string)
+		if specType == "" || draftSpecNeedsExternal(specType) {
+			draftPath := ""
+			if dp, ok := params["model_draft"].(string); ok && strings.TrimSpace(dp) != "" {
+				draftPath = strings.TrimSpace(dp)
+			} else {
+				draftPath = a.resolveDraftModel(b)
+			}
+			if draftPath != "" {
+				if specType == "" {
+					// 草稿自带类型：按 MTP 头自动识别
+					if bundle.HasMTPHeadByFile(draftPath) {
+						params["spec_type"] = "draft-mtp"
+					} else {
+						params["spec_type"] = "draft-simple"
+					}
+				} else if specType == "draft-simple" && bundle.HasMTPHeadByFile(draftPath) {
+					// MTP 草稿必须 draft-mtp，纠正用户/前端的 draft-simple
+					params["spec_type"] = "draft-mtp"
+				}
+				params["model_draft"] = draftPath
+			}
+		}
+	}
 	// 回填草稿参数
 	if b.DraftModel.Enabled && len(b.DraftModel.SpecParams) > 0 {
 		keyMap := map[string]string{
@@ -4661,6 +4805,7 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("POST /api/bundles/import", a.handleImport)
 	mux.HandleFunc("POST /api/bundles/scan", a.handleScan)
 	mux.HandleFunc("POST /api/recommend", a.handleRecommend)
+	mux.HandleFunc("POST /api/budget/dims", a.handleBudgetDims)
 	mux.HandleFunc("GET /api/cache", a.handleCache)
 	mux.HandleFunc("POST /api/cache/delete", a.handleCacheDelete)
 	mux.HandleFunc("POST /api/cache/import", a.handleCacheImport)

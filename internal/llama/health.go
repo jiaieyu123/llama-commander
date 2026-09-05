@@ -55,18 +55,22 @@ func (h *HealthChecker) Health(ctx context.Context) (bool, error) {
 
 // Metrics is the JSON shape exposed by llama-server /metrics.
 type Metrics struct {
-	TPromptProcessing      float64 `json:"t_prompt_processing"`
-	TEval                  float64 `json:"t_eval"`
-	NPromptTokensProcessed int64   `json:"n_prompt_tokens_processed"`
-	NPredicted             int64   `json:"n_predicted"`
-	NPromptTokensTotal     int64   `json:"n_prompt_tokens_total"`
-	NPredictedTokensTotal  int64   `json:"n_predicted_tokens_total"`
-	KVCacheUsageRatio      float64 `json:"kv_cache_usage_ratio"`
-	KVCacheTokensCount     int64   `json:"kv_cache_tokens_count"`
-	SlotsIdle              int     `json:"slots_idle"`
-	SlotsProcessing        int     `json:"slots_processing"`
-	PromptPerSecond        float64 `json:"prompt_per_second"`
-	PredictedPerSecond     float64 `json:"predicted_per_second"`
+	TPromptProcessing       float64 `json:"t_prompt_processing"`
+	TEval                   float64 `json:"t_eval"`
+	NPromptTokensProcessed  int64   `json:"n_prompt_tokens_processed"`
+	NPredicted              int64   `json:"n_predicted"`
+	NPromptTokensTotal      int64   `json:"n_prompt_tokens_total"`
+	NPredictedTokensTotal   int64   `json:"n_predicted_tokens_total"`
+	KVCacheUsageRatio       float64 `json:"kv_cache_usage_ratio"`
+	KVCacheTokensCount      int64   `json:"kv_cache_tokens_count"`
+	SlotsIdle               int     `json:"slots_idle"`
+	SlotsProcessing         int     `json:"slots_processing"`
+	PromptPerSecond         float64 `json:"prompt_per_second"`
+	PredictedPerSecond      float64 `json:"predicted_per_second"`
+	PromptTokensCachedTotal int64   `json:"prompt_tokens_cached_total"`
+	SpecDraftTokensTotal    int64   `json:"spec_draft_tokens_total"`
+	SpecAcceptedTokensTotal int64   `json:"spec_accepted_tokens_total"`
+	SpecDraftsTotal         int64   `json:"spec_drafts_total"`
 }
 
 // Metrics probes GET /metrics and decodes the payload. llama.cpp serves two
@@ -124,6 +128,26 @@ func parsePrometheus(body []byte) *Metrics {
 	if v, ok := get("prompt_tokens_total"); ok {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 			m.NPromptTokensTotal = n
+		}
+	}
+	if v, ok := get("prompt_tokens_cached_total"); ok {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			m.PromptTokensCachedTotal = n
+		}
+	}
+	if v, ok := get("spec_decode_num_draft_tokens_total"); ok {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			m.SpecDraftTokensTotal = n
+		}
+	}
+	if v, ok := get("spec_decode_num_accepted_tokens_total"); ok {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			m.SpecAcceptedTokensTotal = n
+		}
+	}
+	if v, ok := get("spec_decode_num_drafts_total"); ok {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			m.SpecDraftsTotal = n
 		}
 	}
 	if v, ok := get("tokens_predicted_total"); ok {

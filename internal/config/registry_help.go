@@ -96,14 +96,16 @@ var paramGuidance = map[string]ParamGuidance{
 		Related:        []string{"cache_type_k", "cache_type_v"},
 	},
 	"cache_type_k": {
-		Description:    "K 缓存数据类型。f32/f16/bf16=浮点（精度高）；q8_0/q4_0/q4_1/iq4_nl/q5_0/q5_1=量化（省显存，精度略降）。量化后建议开启 Flash Attention。默认 f16。",
-		Recommendation: "f16（平衡）或 q8_0（省显存）",
+		Description:    "K 缓存数据类型。浮点：f32/f16/bf16（精度高）；官方量化：q8_0/q4_0/q4_1/iq4_nl/q5_0/q5_1（省显存）；自编译 PolarQuant-KV 扩展：kvq4_0（独立 4bit 类型 0.53B/元素，我们自研，主推）、q2_0（2bit 实验）。量化后建议开 Flash Attention。",
+		Recommendation: "f16（平衡）、q4_0/kvq4_0（128k 长上下文省显存）",
 		Related:        []string{"cache_type_v", "flash_attn"},
+		Note:           "kvq4_0/q2_0 需 llama-launcher 的 binary_path 指向自编译分支的 llama-server（官方 b10819 报 Unsupported cache type）",
 	},
 	"cache_type_v": {
 		Description:    "V 缓存数据类型，同 K 缓存。通常与 cache-type-k 保持一致。",
-		Recommendation: "f16（平衡）或 q8_0（省显存）",
+		Recommendation: "f16（平衡）或 q4_0/kvq4_0（省显存）",
 		Related:        []string{"cache_type_k", "flash_attn"},
+		Note:           "kvq4_0/q2_0 需自编译分支 llama-server（见 cache_type_k）",
 	},
 	"cpu_moe": {
 		Description:    "MoE 模型的专家层驻留 CPU，节省显存（速度略降）。MoE 模型显存紧张时建议开启。",

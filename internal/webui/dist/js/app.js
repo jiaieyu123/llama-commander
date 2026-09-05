@@ -10,6 +10,7 @@
     import: '/api/bundles/import',
     scan: '/api/bundles/scan',
     recommend: '/api/recommend',
+    budgetDims: '/api/budget/dims',
     sessions: '/api/sessions',
     insights: '/api/insights',
     start: '/api/sessions/start',
@@ -305,6 +306,36 @@
     $('test-config-select').addEventListener('change', function () { if (selectedId && this.value) applySelectedConfig(); });
     $('btn-apply-config').addEventListener('click', function () { if ($('test-config-select').value) applySelectedConfig(); });
     $('btn-optimize').addEventListener('click', onOptimize);
+    $('btn-budget').addEventListener('click', openBudget);
+    $('btn-schema-lib').addEventListener('click', openSchemaLib);
+    $('schema-list').addEventListener('click', function (e) {
+      const b = (e.target && e.target.closest) ? e.target.closest('[data-schema]') : null;
+      if (b) applySchemaTpl(parseInt(b.getAttribute('data-schema'), 10));
+    });
+    $('schema-clear').addEventListener('click', function () {
+      $('p-json_schema').value = '';
+      $('schema-modal').hidden = true;
+      if (typeof refreshPreview === 'function') refreshPreview();
+    });
+    $('schema-custom').addEventListener('click', function () {
+      $('schema-modal').hidden = true;
+      const e = $('p-json_schema');
+      if (e) { e.focus(); e.select(); }
+    });
+    $('bd-apply').addEventListener('click', function () { applyBudget(false); });
+    $('bd-apply-start').addEventListener('click', function () { applyBudget(true); });
+    $('bd-verdict').addEventListener('click', function (e) {
+      const b = (e.target && e.target.closest) ? e.target.closest('[data-setkv]') : null;
+      if (b) {
+        ['bd-kvk', 'bd-kvv'].forEach(function (id2) { $(id2).value = b.getAttribute('data-setkv'); });
+        recalcBudget();
+      }
+    });
+    $('bd-reload').addEventListener('click', function () { syncBudgetFromMain(); recalcBudget(); requestBudgetDims(); });
+    ['bd-model-mb', 'bd-free-mb', 'bd-ctx', 'bd-ngl', 'bd-layers', 'bd-kvh', 'bd-headdim', 'bd-petok', 'bd-kvk', 'bd-kvv'].forEach(function (id2) {
+      $(id2).addEventListener('input', recalcBudget);
+      $(id2).addEventListener('change', recalcBudget);
+    });
     $('btn-params-help').addEventListener('click', openParamsHelp);
     loadParams();
     // ---- 新增：参数搜索与折叠功能初始化 ----
@@ -916,6 +947,281 @@
     });
   }
 
+  // ── 🧮 显存/上下文预算向导 ──────────────────────────────
+  // KV 每 token 字节优先来自模型 GGUF 文件权威解析（后端按 llama.cpp 语义），
+  // 其次来自结构推导（KV头×head_dim×层数），不凭空猜测。
+  let bdPetokSrc = '';
+  function bdBytesPerElem(kind) {
+    switch (kind) {
+      case 'f32': return 4;
+      case 'bf16': case 'f16': return 2;
+      case 'q8_0': case 'q8_1': return 34 / 32;      // 1.0625
+      case 'q2_0': return 18 / 64;                   // 0.28125 (2bit, 64/块, 实验档)
+      case 'kvq4_0': return 34 / 64;                 // 0.53125 (4bit, 64/块, PolarQuant-KV 独立类型)
+      case 'q4_0': case 'iq4_nl': return 18 / 32;     // 0.5625
+      case 'q4_1': return 20 / 32;
+      case 'q5_0': return 22 / 32;
+      case 'q5_1': return 24 / 32;
+      default: return 2;
+    }
+  }
+  function bdFmtMB(v) { return v >= 1024 ? (v / 1024).toFixed(2) + ' GB' : Math.round(v) + ' MB'; }
+  function bdRead() {
+    return {
+      model: Math.max(0, parseFloat($('bd-model-mb').value) || 0),
+      free: Math.max(0, parseFloat($('bd-free-mb').value) || 0),
+      ctx: Math.max(0, parseInt($('bd-ctx').value, 10) || 0),
+      ngl: parseInt($('bd-ngl').value, 10),
+      kvk: $('bd-kvk').value, kvv: $('bd-kvv').value,
+      layers: Math.max(0, parseInt($('bd-layers').value, 10) || 0),
+      kvh: Math.max(0, parseInt($('bd-kvh').value, 10) || 0),
+      hdim: Math.max(0, parseInt($('bd-headdim').value, 10) || 0),
+      petok: Math.max(0, parseFloat($('bd-petok').value) || 0)
+    };
+  }
+  function openBudget() {
+    $('budget-modal').hidden = false;
+    syncBudgetFromMain();
+    recalcBudget();
+    requestBudgetDims();
+  }
+  // 从模型 GGUF 文件权威解析每 token KV（后端 re-parse GGUF 按 llama.cpp 语义逐层计算）。
+  // 任何模型都自动精确，无需预设表/猜测。
+  function requestBudgetDims() {
+    const sel = $('model-select');
+    const id = (selectedId || (sel && sel.value)) || '';
+    if (!id) return;
+    api(API.budgetDims, { method: 'POST', body: JSON.stringify({ bundle_id: id }) })
+      .then(function (res) {
+        const sh = res && res.shape;
+        if (!sh || !(sh.kv_per_token_bytes_f16 > 0)) return;
+        const petok = Math.round(sh.kv_per_token_bytes_f16);
+        if (petok > 0) { $('bd-petok').value = petok; bdPetokSrc = '模型GGUF×llama.cpp'; }
+        const fixed = sh.fixed_swa_cache_mb || 0;
+        const m2 = $('budget-modal');
+        if (m2) m2.dataset.fixedSwaMB = fixed > 0 ? String(fixed) : '';
+        // 权威回填 KV 头数 / head_dim：单值模型直接填；逐层不同（如 gemma4 的 SWA/全局混合）明确标注来源，不再留空困惑。
+        const uniq = function (a) {
+          return Array.from(new Set((a || []).map(Number))).filter(function (x) { return x > 0; });
+        };
+        const kvU = uniq(sh.head_count_kv_per_layer);
+        const dkU = uniq(sh.head_dim_k_per_layer);
+        const dvU = uniq(sh.head_dim_v_per_layer);
+        const varied = kvU.length > 1 || dkU.length > 1 || dvU.length > 1;
+        const hint = $('bd-dim-hint');
+        if (varied) {
+          $('bd-kvh').value = '';
+          $('bd-kvh').placeholder = '逐层不同';
+          const swaNote = (sh.swa_layers > 0) ? '，含 ' + sh.swa_layers + ' 个滑动窗口层(KV 不随 ctx 增长)' : '';
+          if (hint) hint.textContent = (sh.architecture || '') + ' · ' + sh.layers + ' 层 · KV头逐层不同(' + kvU.join('/') + ')' + swaNote + ' → 已由 GGUF×llama.cpp 权威换算为每 token KV，无需手填。';
+        } else {
+          if (kvU.length === 1) { $('bd-kvh').value = kvU[0]; $('bd-kvh').placeholder = ''; }
+          if (dkU.length === 1) $('bd-headdim').value = dkU[0];
+          if (hint) hint.textContent = (sh.architecture || '') + ' · ' + sh.layers + ' 层 · KV头 ' + (kvU[0] || '?') + ' · head_dim ' + (dkU[0] || sh.head_dim_default || '?') + '（来自 GGUF 文件）';
+        }
+        recalcBudget();
+      })
+      .catch(function () {});
+  }
+  function syncBudgetFromMain() {
+    bdPetokSrc = '';
+    const kvhInput = $('bd-kvh');
+    if (kvhInput) kvhInput.placeholder = '';
+    const sel = $('model-select');
+    const id = (selectedId || (sel && sel.value)) || '';
+    const b = id ? (bundles.find(function (x) { return x.id === id; }) || null) : null;
+    const m = (b && b.base_model && b.base_model.metadata) || null;
+    const fileMB = (b && b.base_model && b.base_model.file_size_mb) ? b.base_model.file_size_mb
+      : (b && b.file_size_mb) || 0;
+    const layers = m && m.block_count ? Number(m.block_count) : 0;
+    const head = m ? Number(m.head_count || 0) : 0;
+    const kvh = m ? Number(m.head_count_kv || 0) : 0;
+    const emb = m ? Number(m.embedding_length || 0) : 0;
+    const hdim = (emb && head) ? Math.round(emb / head) : 0;
+    const params = (typeof collectParams === 'function') ? collectParams() : {};
+    const ctx = (params && params.ctx_size) ? parseInt(params.ctx_size, 10)
+      : (($('p-ctx_size') && $('p-ctx_size').value) ? parseInt($('p-ctx_size').value, 10) : 0);
+    const nglRaw = (params && params.n_gpu_layers !== undefined && params.n_gpu_layers !== '')
+      ? params.n_gpu_layers : ($('p-n_gpu_layers') && $('p-n_gpu_layers').value);
+    const ngl = (nglRaw === '' || nglRaw === undefined || nglRaw === null) ? -1 : parseInt(nglRaw, 10);
+    const kvk = (params && params.cache_type_k) || ($('p-cache_type_k') ? $('p-cache_type_k').value : '') || 'f16';
+    const kvv = (params && params.cache_type_v) || ($('p-cache_type_v') ? $('p-cache_type_v').value : '') || 'f16';
+    if (fileMB) $('bd-model-mb').value = Math.round(fileMB);
+    if (ctx) $('bd-ctx').value = ctx;
+    $('bd-ngl').value = (ngl === -1 || isNaN(ngl)) ? -1 : ngl;
+    if (layers) $('bd-layers').value = layers;
+    $('bd-kvh').value = kvh || '';
+    if (hdim) $('bd-headdim').value = hdim;
+    // ctx 预设下拉：按模型 context_length 上限生成（含原生最大/超大档）；同时记录 ctxcap 供下方 ctx 档位 chips 使用
+    const mxc = (m && m.context_length) ? Number(m.context_length) : 0;
+    const m2 = $('budget-modal');
+    if (m2) m2.dataset.ctxcap = String(mxc || (ctx || 0) * 2 || 262144);
+    if (m2) m2.dataset.fixedSwaMB = '';
+    if (typeof fillCtxPreset === 'function') fillCtxPreset($('bd-ctx-preset'), mxc);
+    // GPU 层数预设：补一个「全部层(N)」
+    const nglPreset = $('bd-ngl-preset');
+    if (nglPreset && layers > 0 && !Array.prototype.some.call(nglPreset.options, function (o) { return o.value === String(layers); })) {
+      const oo = document.createElement('option'); oo.value = String(layers); oo.textContent = layers + ' 全部层'; nglPreset.appendChild(oo);
+    }
+    // 已知实测校准表：KV 每 token（K+V, f16 基准, B/tok）。来自 llama-server 差分实测
+    // (nvidia-smi 占用差 ctx4096→65536 = 1015MB/61440tok)，与 64k 全速 / 128k 掉速实测吻合。
+    const arch = (m && m.architecture) || '';
+    const PETOK_CAL = { '48,3840': 17323 }; // gemma4-12b(48层, emb3840) 差分实测
+    const calTok = (!kvh && PETOK_CAL[layers + ',' + emb]) ? PETOK_CAL[layers + ',' + emb] : 0;
+    if (calTok) { $('bd-petok').value = calTok; bdPetokSrc = '实测校准(nvidia差分)'; }
+    const hw = window.__hardware || {};
+    const freeMB = hw.free_vram_mb ? hw.free_vram_mb : (hw.total_vram_mb ? Math.round(hw.total_vram_mb * 0.9) : 0);
+    if (freeMB) $('bd-free-mb').value = Math.round(freeMB);
+    const hint = $('bd-dim-hint');
+    if (!fileMB || !layers) hint.textContent = '未选择模型 — 请先在配置面板选择模型，或手动填写权重与维度。';
+    else if (!kvh && !calTok) hint.textContent = '⚠️ 该模型 GGUF 未提供 KV 头数(head_count_kv)且暂无实测校准：可手填 KV 头数 + head_dim，或在「⚙️ 输入」填实测 KV 每token(B/tok)。';
+    else if (!kvh && calTok) hint.textContent = arch + ' · ' + layers + ' 层 · 已用实测校准 KV ≈ ' + calTok + ' B/tok（f16 基准，差分实测）→ 可全自动精确估算。';
+    else hint.textContent = '架构 ' + arch + ' · 头数 ' + head + ' · KV头 ' + kvh + ' · 隐层 ' + emb + ' · head_dim≈' + hdim;
+    if ($('bd-kvk').options && !Array.prototype.some.call($('bd-kvk').options, function (o) { return o.value === kvk; })) { /* keep default */ }
+    else $('bd-kvk').value = kvk;
+    if ($('bd-kvv').options && !Array.prototype.some.call($('bd-kvv').options, function (o) { return o.value === kvv; })) { /* keep default */ }
+    else $('bd-kvv').value = kvv;
+  }
+  function recalcBudget() {
+    const d = bdRead();
+    const m2 = $('budget-modal');
+    const ctxCap = (m2 && m2.dataset.ctxcap) ? parseInt(m2.dataset.ctxcap, 10) : 0;
+    const buckets = [8192, 16384, 32768, 49152, 65536, 98304, 131072];
+    if (ctxCap > 131072) {
+      [196608, 262144, 393216, 524288, 786432, 1048576, 1572864, 2097152].forEach(function (c) {
+        if (c <= ctxCap) buckets.push(c);
+      });
+    }
+    if (d.ctx > 0 && buckets.indexOf(d.ctx) < 0) { buckets.push(d.ctx); buckets.sort(function (a, b) { return a - b; }); }
+    if (!d.model || !d.layers) {
+      $('bd-verdict').innerHTML = '<span style="color:#ff9800">请选择模型或填写权重 / 层数。</span>';
+      return;
+    }
+    const canKV = !!((d.kvh && d.hdim) || d.petok > 0);
+    let kvBytesToken = 0, kvSrc = '';
+    if (canKV) {
+      if (d.petok > 0) { kvBytesToken = d.petok * (bdBytesPerElem(d.kvk) + bdBytesPerElem(d.kvv)) / 4; kvSrc = (bdPetokSrc || '用户填写') + '(f16基准×当前KV档)'; }
+      else { kvBytesToken = d.kvh * d.hdim * d.layers * (bdBytesPerElem(d.kvk) + bdBytesPerElem(d.kvv)); kvSrc = '结构推导'; }
+    }
+    const kvMB = kvBytesToken ? kvBytesToken * d.ctx / (1024 * 1024) : 0;
+    const cpuOnly = d.ngl === 0;
+    if (cpuOnly) {
+      $('bd-kvline').textContent = '纯 CPU 模式（GPU 层数=0）：权重与 KV 缓存都在 CPU，不占显存。';
+      $('bd-total').textContent = '显存占用 ≈ 0 MB / 可用 ' + bdFmtMB(d.free) + '（全 CPU 推理）';
+      $('bd-fill').style.width = '0%';
+      $('bd-verdict').innerHTML = 'ℹ️ <b style="color:#4caf50">纯 CPU 模式不占用显存</b>。如需 GPU 加速，请把 GPU 层数设为 ≥1（此模型共 ' + d.layers + ' 层，全量用 -1）。';
+      $('bd-buckets').innerHTML = '';
+      return;
+    }
+    const wFrac = (d.ngl < 0 || isNaN(d.ngl) || d.ngl >= d.layers) ? 1 : (d.layers ? d.ngl / d.layers : 1);
+    const wMB = d.model * wFrac;
+    const overhead = 512;
+    const totalMB = wMB + kvMB + overhead;
+    const fixedSwa = (m2 && m2.dataset.fixedSwaMB) ? parseFloat(m2.dataset.fixedSwaMB) : 0;
+    $('bd-kvline').textContent = kvBytesToken
+      ? 'KV 每 token ≈ ' + (kvBytesToken / 1024).toFixed(1) + ' KB（' + kvSrc + '）· 当前 ctx=' + d.ctx + ' 的 KV ≈ ' + bdFmtMB(kvMB) + (fixedSwa > 0 ? ' · 固定滑动窗口缓存 ≈ ' + fixedSwa.toFixed(0) + ' MB(不随ctx)' : '')
+      : 'KV 无法精确估算：请填 KV 头数 + head_dim，或填「KV 每token(实测)」。';
+    $('bd-total').textContent = '权重 ' + bdFmtMB(wMB) + (wFrac < 1 ? '（全量 ' + bdFmtMB(d.model) + '）' : '') +
+      ' + KV ' + bdFmtMB(kvMB) + ' + 缓冲 ' + bdFmtMB(overhead) + ' = ' + bdFmtMB(totalMB) + ' / 可用 ' + bdFmtMB(d.free);
+    const fill = $('bd-fill');
+    const pct = d.free > 0 ? Math.min(100, totalMB / d.free * 100) : 0;
+    fill.style.width = pct + '%';
+    fill.style.background = pct > 90 ? '#f44336' : (pct > 70 ? '#ff9800' : 'linear-gradient(90deg,#4caf50,#ff9800)');
+    // 结论
+    let html = '';
+    if (d.model > d.free) {
+      html += '❌ <b style="color:#f44336">整模型权重已超可用显存</b>（' + bdFmtMB(d.model) + ' &gt; ' + bdFmtMB(d.free) + '）：无法全量卸载 GPU，部分层常驻 CPU → 速度大幅下降。建议换更小量化，或减少 GPU 层数。';
+    } else if (!canKV) {
+      html += 'ℹ️ 权重 ' + bdFmtMB(d.model) + ' ≤ 可用，可全量卸载 GPU；填写 <b>KV 头数 + head_dim</b>，或填 <b>KV 每token(实测)</b> 后即可估算 KV 与最大上下文。';
+    } else {
+      const needFull = d.model + kvMB + overhead;
+      const fullOK = needFull <= d.free;
+      const maxCtx = (d.free > d.model + overhead) ? Math.floor((d.free - d.model - overhead) * 1024 * 1024 / kvBytesToken) : 0;
+      if (fullOK) {
+        html += '✅ <b style="color:#4caf50">当前设置可全速运行</b>（全部层在 GPU）：权重+KV+缓冲 ≈ ' + bdFmtMB(needFull) + ' ≤ ' + bdFmtMB(d.free) + '。';
+      } else {
+        html += '⚠️ <b style="color:#ff9800">KV 超出预算</b>：ctx=' + d.ctx + ' 需要 ≈ ' + bdFmtMB(needFull) + ' &gt; 可用 ' + bdFmtMB(d.free) + '，全量卸载时部分层会被移出 GPU → <b>掉速（实测约降 40~50%，如 45→21 t/s）</b>。';
+      }
+      if (maxCtx > 0) html += ' 该 KV 档位下<b>全速最大 ctx ≈ ' + maxCtx + '</b>。';
+      if (!fullOK) html += '<br>建议：把 ctx 降到 ≤ ' + maxCtx + '（保速度），或把 KV 缓存降为 <b>q8_0 / q4_0</b>（保更长上下文，KV 减半到 1/4）。';
+      if (!fullOK && d.kvk !== 'q4_0' && d.kvk !== 'iq4_nl') {
+        html += '<div style="margin-top:8px"><button class="btn small accent" data-setkv="q4_0" type="button">🔽 一键把 KV 缓存降到 q4_0（约省 3/4 显存，保住该 ctx 全速）</button></div>';
+      }
+    }
+    $('bd-verdict').innerHTML = html;
+    // ctx 档位
+    if (!canKV) { $('bd-buckets').innerHTML = ''; return; }
+    let chips = '';
+    buckets.forEach(function (c) {
+      const k = kvBytesToken * c / (1024 * 1024);
+      const need = d.model + k + overhead;
+      const fit = need <= d.free;
+      const sel = c === d.ctx;
+      const lbl = c >= 1048576 ? (c / 1048576) + 'M' : (c / 1024) + 'k';
+      const kvTxt = k >= 1024 ? (k / 1024).toFixed(1) + 'G' : Math.round(k) + 'M';
+      chips += '<span title="' + (fit ? '该 ctx 可全速' : 'KV 超预算 → 部分层掉 CPU') + '" style="padding:4px 8px;border-radius:6px;font-size:12px;cursor:pointer;background:' +
+        (sel ? '#4f8cff' : (fit ? '#1e3a2a' : '#3a2a1e')) + ';color:' + (sel ? '#fff' : '#ddd') + ';border:1px solid ' +
+        (sel ? 'transparent' : (fit ? '#2e7d4f' : '#7d5a2e')) + '" data-ctx="' + c + '">ctx ' + lbl + ' · KV ' + kvTxt + ' ' + (fit ? '✅' : '⚠️') + '</span>';
+    });
+    $('bd-buckets').innerHTML = chips;
+    Array.prototype.forEach.call($('bd-buckets').querySelectorAll('[data-ctx]'), function (el) {
+      el.addEventListener('click', function () { $('bd-ctx').value = el.dataset.ctx; recalcBudget(); });
+    });
+  }
+  function applyBudget(doStart) {
+    const d = bdRead();
+    if ($('p-ctx_size')) $('p-ctx_size').value = d.ctx;
+    [['p-cache_type_k', d.kvk], ['p-cache_type_v', d.kvv]].forEach(function (pair) {
+      const s = $(pair[0]);
+      if (!s) return;
+      if (Array.prototype.some.call(s.options, function (o) { return o.value === pair[1]; })) s.value = pair[1];
+    });
+    // 会话复用编排：开启 prompt 前缀缓存（--cache-reuse 256 + --cache-idle-slots）
+    const reuse = $('bd-reuse');
+    if (reuse && reuse.checked) {
+      const cr = $('p-cache_reuse');
+      if (cr) cr.value = 256;
+      const cis = $('p-cache_idle_slots');
+      if (cis) cis.checked = true;
+    }
+    if (typeof refreshPreview === 'function') refreshPreview();
+    $('budget-modal').hidden = true;
+    if (doStart) {
+      if (typeof onStart === 'function') { onStart(); }
+      else if ($('btn-start')) { $('btn-start').click(); }
+    }
+  }
+
+  // ── 📚 结构化输出模板库 ──────────────────────────────
+  const SCHEMA_LIB = [
+    { name: '任意 JSON 对象', desc: '通用兜底：接受任意合法 JSON 对象', schema: '{}' },
+    { name: '问答 + 置信度', desc: 'answer: 答案 · confidence: 0~1 置信度', schema: '{"type":"object","properties":{"answer":{"type":"string"},"confidence":{"type":"number","minimum":0,"maximum":1}},"required":["answer","confidence"]}' },
+    { name: '字符串数组（标签 / 要点）', desc: 'items: string[]', schema: '{"type":"object","properties":{"items":{"type":"array","items":{"type":"string"}}},"required":["items"]}' },
+    { name: '键值对（任意属性）', desc: '任意 {key: value}，值可为任意 JSON', schema: '{"type":"object","additionalProperties":true}' },
+    { name: '工具 / 函数调用', desc: 'name: 函数名 · arguments: 对象', schema: '{"type":"object","properties":{"name":{"type":"string"},"arguments":{"type":"object"}},"required":["name","arguments"]}' },
+    { name: '分类 / 打分', desc: 'label: 类别 · score: 0~1', schema: '{"type":"object","properties":{"label":{"type":"string"},"score":{"type":"number","minimum":0,"maximum":1}},"required":["label","score"]}' },
+    { name: '翻译', desc: 'translation: 译文文本', schema: '{"type":"object","properties":{"translation":{"type":"string"}},"required":["translation"]}' },
+    { name: '摘要 + 要点', desc: 'summary: 摘要 · key_points: string[]', schema: '{"type":"object","properties":{"summary":{"type":"string"},"key_points":{"type":"array","items":{"type":"string"}}},"required":["summary","key_points"]}' }
+  ];
+  function openSchemaLib() {
+    const box = $('schema-list');
+    box.innerHTML = SCHEMA_LIB.map(function (t, i) {
+      return '<div style="border:1px solid #2b3448;border-radius:8px;padding:8px 10px;display:flex;gap:10px;align-items:center">' +
+        '<div style="flex:1;min-width:0"><b>' + esc(t.name) + '</b>' +
+        '<div style="font-size:11px;color:#9aa7bd;margin-top:2px">' + esc(t.desc) + '</div>' +
+        '<code style="font-size:10px;color:#6f7d95;overflow-wrap:anywhere">' + esc(t.schema) + '</code></div>' +
+        '<button class="btn small" data-schema="' + i + '">选用</button></div>';
+    }).join('');
+    $('schema-modal').hidden = false;
+  }
+  function applySchemaTpl(i) {
+    const t = SCHEMA_LIB[i];
+    if (!t) return;
+    $('p-json_schema').value = t.schema;
+    $('schema-modal').hidden = true;
+    if (typeof refreshPreview === 'function') refreshPreview();
+  }
+
   function onModelChangeMeta() {
     const id = $('model-select').value;
     const b = bundles.find(x => x.id === id);
@@ -976,6 +1282,9 @@
     if (isMtpModel) return 'draft-mtp';
     if (!draftPath) return '';
     const lower = String(draftPath).toLowerCase();
+    // 外部 MTP 草稿（文件名含 mtp/nextn，如 mtp-*.gguf）：必须配 draft-mtp，
+    // 否则 llama.cpp 会把 MTP 模型当普通草稿 decode，speculative 解码直接崩。
+    if (lower.indexOf('mtp') >= 0 || lower.indexOf('nextn') >= 0) return 'draft-mtp';
     if (lower.indexOf('dspark') >= 0) return 'draft-dspark';
     if (lower.indexOf('dflash') >= 0) return 'draft-dflash';
     if (lower.indexOf('eagle') >= 0) return 'draft-eagle3';
@@ -1515,7 +1824,10 @@
       return;
     }
     var parts = type.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
-    var usesDraft = parts.some(function (s) {
+    // 外部 MTP 草稿（draft-mtp + 独立草稿路径，且主模型不自带 MTP 头）同样需要提交
+    // 草稿路径；只有“主模型自带 MTP 头”（isMtpModel）的 draft-mtp 才不需要外部草稿。
+    var extMtpDraft = parts.indexOf('draft-mtp') >= 0 && !isMtpModel && draftPath !== '';
+    var usesDraft = extMtpDraft || parts.some(function (s) {
       return s === 'draft-simple' || s === 'draft-eagle3' || s === 'draft-dflash' || s === 'draft-dspark';
     });
     if (usesDraft && !draftPath) {
@@ -1720,6 +2032,7 @@
           <button class="btn small" data-stop="${esc(s.id)}">⏹ 停止</button>
           <button class="btn small" data-restart="${esc(s.id)}">🔄 重启</button>
           <button class="btn small" data-open="${baseUrl}">🔗 打开</button>
+          ${s.status !== 'crashed' ? '<button class="btn small" data-snap="' + esc(s.id) + '" title="把当前实例的真实运行参数存为该模型的命名快照，随时可套用恢复">💾 快照</button>' : ''}
         </div>`;
       div.querySelector('[data-stop]').addEventListener('click', function () {
         api('/api/sessions/' + s.id + '/stop', { method: 'POST' })
@@ -1734,6 +2047,22 @@
       });
       div.querySelector('[data-open]').addEventListener('click', function () {
         window.open(this.dataset.open, '_blank');
+      });
+      const snapBtn = div.querySelector('[data-snap]');
+      if (snapBtn) snapBtn.addEventListener('click', function () {
+        const defName = '快照 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
+        const name = prompt('保存当前实例的真实运行参数为命名快照（之后在配置面板「测试配置」下拉可一键套用/恢复启动）：', defName);
+        if (name === null) return;
+        const nm = (name || defName).trim();
+        const params = (s.params && Object.keys(s.params).length) ? s.params : (typeof collectParams === 'function' ? collectParams() : {});
+        if (!Object.keys(params).length) { alert('没有可保存的参数'); return; }
+        api('/api/bundles/' + encodeURIComponent(s.bundle_id) + '/configs', {
+          method: 'POST',
+          body: JSON.stringify({ name: nm, params: params })
+        }).then(function () {
+          appendLog('INFO', '💾 已保存实例快照「' + nm + '」→ 该模型测试配置');
+          alert('✅ 已保存快照「' + nm + '」。\n切到「配置」面板的“测试配置”下拉即可套用并恢复启动（保留 ctx / KV 档 / 投机等全部运行参数）。');
+        }).catch(function (e) { alert('保存失败: ' + e.message); });
       });
       div.querySelector('[data-copy-api]').addEventListener('click', function () {
         copyKey(this.dataset.copyApi, this);
@@ -2194,6 +2523,26 @@
       const rate = function (v) { return (typeof v === 'number' && isFinite(v)) ? v.toFixed(1) : '--'; };
       const kv = (typeof m.kv_cache_usage_ratio === 'number')
         ? (m.kv_cache_usage_ratio * 100).toFixed(0) + '%' : '--';
+      // prompt 前缀缓存命中：cached(cached_total) 占 prompt 总量的比例
+      const reusePct = function (mm) {
+        const t = mm.prompt_tokens_total, c = mm.prompt_tokens_cached_total;
+        if (typeof t === 'number' && t > 0 && typeof c === 'number') {
+          return Math.max(0, Math.min(100, Math.round(c / t * 100))) + '%';
+        }
+        const p = mm.n_prompt_tokens_processed;
+        if (typeof t === 'number' && t > 0 && typeof p === 'number') {
+          return Math.max(0, Math.round((1 - p / t) * 100)) + '%';
+        }
+        return '--';
+      };
+      // 投机解码接受率：accepted / draft（草稿 token 中被主模型接受的比例）
+      const specPct = function (mm) {
+        const a = mm.spec_accepted_tokens_total, d = mm.spec_draft_tokens_total;
+        if (typeof d === 'number' && d > 0 && typeof a === 'number') {
+          return Math.round(a / d * 100) + '%';
+        }
+        return '--';
+      };
       return `<div class="monitor-card" data-session="${esc(it.session_id)}">
         <div class="monitor-head"><b>${esc(it.bundle || ('session ' + it.session_id))}</b>
           <span class="monitor-tag">:${it.port}</span>
@@ -2207,6 +2556,8 @@
           <div class="metric"><span class="m-label">⬆ 输出速率</span><span class="m-value" data-role="rps">${rate(m.predicted_per_second)}</span><span class="m-unit">tok/s</span></div>
           <div class="metric"><span class="m-label">🧵 并发槽位</span><span class="m-value" data-role="slots">${fmt(m.slots_processing)}</span></div>
           <div class="metric"><span class="m-label">🧠 KV 占用</span><span class="m-value" data-role="kv">${kv}</span></div>
+          <div class="metric"><span class="m-label">🔄 缓存命中</span><span class="m-value" data-role="reuse" title="prompt 前缀缓存命中 token 占比（多轮/重复请求省预填充）">${reusePct(m)}</span></div>
+          <div class="metric"><span class="m-label">⚡ 投机接受</span><span class="m-value" data-role="spec" title="投机草稿 token 接受率（高=提速明显；持续过低说明草稿不匹配）">${specPct(m)}</span></div>
         </div>
         <div class="monitor-chart" style="height:150px;margin-top:8px"></div>
         <div class="req-history" data-sid="${esc(it.session_id)}"></div>
@@ -2228,6 +2579,21 @@
         if (typeof m.predicted_per_second === 'number' && isFinite(m.predicted_per_second)) set('rps', m.predicted_per_second.toFixed(1));
         if (typeof m.slots_processing === 'number') set('slots', m.slots_processing.toLocaleString());
         if (typeof m.kv_cache_usage_ratio === 'number') set('kv', (m.kv_cache_usage_ratio * 100).toFixed(0) + '%');
+        if (typeof m.prompt_tokens_total === 'number' && m.prompt_tokens_total > 0 && typeof m.prompt_tokens_cached_total === 'number') {
+          set('reuse', Math.max(0, Math.min(100, Math.round(m.prompt_tokens_cached_total / m.prompt_tokens_total * 100))) + '%');
+        } else if (typeof m.n_prompt_tokens_total === 'number' && m.n_prompt_tokens_total > 0 && typeof m.n_prompt_tokens_processed === 'number') {
+          set('reuse', Math.max(0, Math.round((1 - m.n_prompt_tokens_processed / m.n_prompt_tokens_total) * 100)) + '%');
+        }
+        // 投机自检：接受率过低（草稿长期不匹配）→ 橙色提示 + 一次性告警日志
+        if (typeof m.spec_draft_tokens_total === 'number' && m.spec_draft_tokens_total > 0 && typeof m.spec_accepted_tokens_total === 'number') {
+          const rate = Math.round(m.spec_accepted_tokens_total / m.spec_draft_tokens_total * 100);
+          const e = card.querySelector('[data-role="spec"]');
+          if (e) { e.textContent = rate + '%'; e.style.color = rate < 45 ? '#ff9800' : ''; }
+          if (rate < 45 && m.spec_drafts_total > 20 && !window.__specWarned) {
+            window.__specWarned = true;
+            appendLog('WARN', '⚡ 投机接受率偏低(' + rate + '%)——草稿模型可能与主模型不匹配，建议改配更贴近的草稿，或关闭投机(--spec-type none) 以省去无效草稿开销');
+          }
+        }
       });
       MonChart.push(sid, m);
     },
@@ -3480,9 +3846,9 @@
     { key: 'ubatch_size', label: '微批大小', type: 'int', hint: '预填充实际执行批次', def: '', ph: '如 64, 128, 256',
       presets: [['64,128,256,512,1024', '全覆盖'], ['64,128,256', '小/中/大'], ['128,256', '两档'], ['256,512', '中/大'], ['512', '固定512']] },
     { key: 'cache_type_k', label: 'K 缓存类型', type: 'enum', hint: '量化缓存省显存（需 Flash 注意力）', def: '', ph: '如 f16, q8_0',
-      presets: [['f32,f16,bf16,q8_0,q4_0,q4_1,iq4_nl,q5_0,q5_1', '全覆盖'], ['f16,q8_0', 'f16 vs 量化'], ['f16,q8_0,q4_0', '三档'], ['q8_0', '固定q8_0'], ['f16', '固定f16'], ['q4_0', '固定q4_0'], ['q4_1', '固定q4_1']] },
+      presets: [['f32,f16,bf16,q8_0,q4_0,q4_1,iq4_nl,q5_0,q5_1,q2_0,kvq4_0', '全覆盖'], ['f16,q8_0', 'f16 vs 量化'], ['f16,q8_0,q4_0', '三档'], ['q8_0', '固定q8_0'], ['f16', '固定f16'], ['q4_0', '固定q4_0'], ['q4_1', '固定q4_1']] },
     { key: 'cache_type_v', label: 'V 缓存类型', type: 'enum', hint: '同 K 缓存', def: '', ph: '如 f16, q8_0',
-      presets: [['f32,f16,bf16,q8_0,q4_0,q4_1,iq4_nl,q5_0,q5_1', '全覆盖'], ['f16,q8_0', 'f16 vs 量化'], ['f16,q8_0,q4_0', '三档'], ['q8_0', '固定q8_0'], ['f16', '固定f16'], ['q4_0', '固定q4_0'], ['q4_1', '固定q4_1']] },
+      presets: [['f32,f16,bf16,q8_0,q4_0,q4_1,iq4_nl,q5_0,q5_1,q2_0,kvq4_0', '全覆盖'], ['f16,q8_0', 'f16 vs 量化'], ['f16,q8_0,q4_0', '三档'], ['q8_0', '固定q8_0'], ['f16', '固定f16'], ['q4_0', '固定q4_0'], ['q4_1', '固定q4_1']] },
     { key: 'flash_attn', label: 'Flash 注意力', type: 'enum', hint: '量化 KV 需开 FA', def: '', ph: 'on / off',
       presets: [['on,off,auto', '全覆盖'], ['on,off', '开 vs 关'], ['on', '固定开'], ['off', '固定关']] },
     { key: 'rope_scaling', label: 'RoPE 缩放', type: 'enum', hint: '留空=不设置', def: '', ph: 'linear / yarn',

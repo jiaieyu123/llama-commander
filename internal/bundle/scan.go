@@ -129,16 +129,27 @@ func applyCompanions(b *Bundle, hints CompanionHints) {
 		b.Tags = append(b.Tags, "vision")
 	}
 	if hints.Draft != "" {
+		// 伴生草稿类型探测：带 MTP 头的草稿（如 mtp-*.gguf）必须配 draft-mtp ——
+		// llama.cpp 会把该文件作为“外部 MTP 草稿”建 MTP context（实测支持外部 MTP 草稿）；
+		// 若用 draft-simple 会把 MTP 模型当普通小草稿 decode，speculative 解码直接崩。
+		specType := "draft-simple"
+		specParams := map[string]any{
+			"n_max":   16, // 与 registry 默认值保持一致
+			"n_min":   0,
+			"p_split": 0.10,
+			"p_min":   0.00,
+		}
+		if HasMTPHeadByFile(hints.Draft) {
+			specType = "draft-mtp"
+			// draft-mtp 的 n_max 由 llama.cpp 按草稿 n_mtp_layers 适配，走官方默认即可；
+			// 不再下发 simple 风格的大 n_max=16。
+			specParams = map[string]any{}
+		}
 		b.DraftModel = DraftModel{
-			Path:     hints.Draft,
-			Enabled:  true,
-			SpecType: "draft-simple",
-			SpecParams: map[string]any{
-				"n_max":   16, // 与 registry 默认值保持一致
-				"n_min":   0,
-				"p_split": 0.10,
-				"p_min":   0.00,
-			},
+			Path:       hints.Draft,
+			Enabled:    true,
+			SpecType:   specType,
+			SpecParams: specParams,
 		}
 	}
 	for _, p := range hints.LORA {

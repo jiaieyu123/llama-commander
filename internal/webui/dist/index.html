@@ -82,6 +82,7 @@
         <select id="model-select"><option value="">— 请选择模型 —</option></select>
         <button class="btn small" id="btn-refresh-models" title="刷新模型库">🔄</button>
         <button class="btn small accent" id="btn-optimize" title="一键优化">✨ 一键优化</button>
+        <button class="btn small" id="btn-budget" title="显存/上下文预算向导：估算 KV 缓存与权重占用，给出全速最大上下文">🧮 预算向导</button>
         <button class="btn small" id="btn-params-help" title="查看全部参数说明与调整方法">📖 参数说明</button>
       </div>
       <div class="cfg-row">
@@ -122,10 +123,10 @@
             <select id="p-flash_attn"><option value="auto" selected>auto（官方默认，自动）</option><option value="on">on（强制开启）</option><option value="off">off（强制关闭，兼容最好）</option></select><span class="src" data-key="flash_attn">🌐</span>
           </div>
           <div class="field"><label>K 缓存</label>
-            <select id="p-cache_type_k"><option value="f16" selected>f16（官方默认，均衡）</option><option value="f32">f32（32位浮点，精度最高）</option><option value="bf16">bf16（脑浮点，精度损失小）</option><option value="q8_0">q8_0（8位量化，省显存）</option><option value="q4_0">q4_0（4位量化，更省）</option><option value="q4_1">q4_1（4位量化+偏移）</option><option value="iq4_nl">iq4_nl（智能4位，推荐）</option><option value="q5_0">q5_0（5位量化）</option><option value="q5_1">q5_1（5位量化+偏移）</option></select>
+            <select id="p-cache_type_k"><optgroup label="🟢 官方原生（llama.cpp 9 种·任意 llama-server 可用）"><option value="f16" selected>f16（16位浮点·官方默认，均衡）</option><option value="f32">f32（32位浮点·精度最高）</option><option value="bf16">bf16（16位脑浮点·精度损失小）</option><option value="q8_0">q8_0（8位量化·省显存）</option><option value="q4_0">q4_0（4位量化·更省·PolarQuant 实测甜点）</option><option value="q4_1">q4_1（4位量化+偏移）</option><option value="iq4_nl">iq4_nl（4位智能·推荐）</option><option value="q5_0">q5_0（5位量化）</option><option value="q5_1">q5_1（5位量化+偏移）</option></optgroup><optgroup label="🔵 PolarQuant-KV 自编译扩展（仅自编译分支的 llama-server）"><option value="kvq4_0">kvq4_0（4位·独立类型·0.53B/元素·主推）</option><option value="q2_0">q2_0（2位·实验档·显存再省一半）</option></optgroup></select>
           </div>
           <div class="field"><label>V 缓存</label>
-            <select id="p-cache_type_v"><option value="f16" selected>f16（官方默认，均衡）</option><option value="f32">f32（32位浮点，精度最高）</option><option value="bf16">bf16（脑浮点，精度损失小）</option><option value="q8_0">q8_0（8位量化，省显存）</option><option value="q4_0">q4_0（4位量化，更省）</option><option value="q4_1">q4_1（4位量化+偏移）</option><option value="iq4_nl">iq4_nl（智能4位，推荐）</option><option value="q5_0">q5_0（5位量化）</option><option value="q5_1">q5_1（5位量化+偏移）</option></select>
+            <select id="p-cache_type_v"><optgroup label="🟢 官方原生（llama.cpp 9 种·任意 llama-server 可用）"><option value="f16" selected>f16（16位浮点·官方默认，均衡）</option><option value="f32">f32（32位浮点·精度最高）</option><option value="bf16">bf16（16位脑浮点·精度损失小）</option><option value="q8_0">q8_0（8位量化·省显存）</option><option value="q4_0">q4_0（4位量化·更省·PolarQuant 实测甜点）</option><option value="q4_1">q4_1（4位量化+偏移）</option><option value="iq4_nl">iq4_nl（4位智能·推荐）</option><option value="q5_0">q5_0（5位量化）</option><option value="q5_1">q5_1（5位量化+偏移）</option></optgroup><optgroup label="🔵 PolarQuant-KV 自编译扩展（仅自编译分支的 llama-server）"><option value="kvq4_0">kvq4_0（4位·独立类型·0.53B/元素·主推）</option><option value="q2_0">q2_0（2位·实验档·显存再省一半）</option></optgroup></select>
           </div>
           <div class="field"><label>RoPE 缩放</label>
             <select id="p-rope_scaling"><option value="">自动（✅推荐，跟随模型）</option><option value="none">none（不缩放）</option><option value="linear">linear（线性外推）</option><option value="yarn">yarn（YaRN，长上下文更佳）</option></select>
@@ -155,6 +156,14 @@
           <div class="field"><label class="chk"><input type="checkbox" id="p-op_offload"> 张量操作卸载 GPU</label></div>
           <div class="field"><label class="chk"><input type="checkbox" id="p-cont_batching"> 连续批处理</label></div>
           <div class="field"><label>槽位复用相似度</label><input type="number" id="p-slot_prompt_similarity" value="" placeholder="0.1（默认）" min="0" max="1" step="0.05"></div>
+          <div class="field" style="margin-top:6px;padding-top:8px;border-top:1px solid #2b3448"><label>🧩 结构化输出 JSON Schema</label>
+            <span style="display:flex;gap:6px;align-items:center">
+              <input type="text" id="p-json_schema" value="" placeholder='留空=自由文本。可手输 JSON Schema，或点 📚 模板库' style="flex:1">
+              <button class="btn small" id="btn-schema-lib" type="button" title="选择内置 JSON Schema 模板">📚 模板库</button>
+            </span>
+            <span class="m-unit" style="font-size:11px">启动时 llama-server 自动转 grammar，强制模型输出合法 JSON（配合 API response_format）</span>
+          </div>
+          <div class="field"><label>BNF 语法（GBNF，优先级高于 JSON Schema）</label><input type="text" id="p-grammar" value="" placeholder="留空=不用；JSON Schema 已能应付大多数结构化输出"></div>
         </fieldset>
 
         <!-- 🧩 投机解码（MTP 多 Token 预测 / 外部草稿模型）-->
@@ -536,6 +545,77 @@
         <div id="big-history" class="req-history" style="max-height:260px"></div>
       </div>
       <div class="modal-foot"><button class="btn" data-close>关闭</button></div>
+    </div>
+  </div>
+
+  <!-- 显存/上下文预算向导（KV 缓存 + 权重 显存估算 / 全速最大上下文建议） -->
+  <div class="modal-overlay" id="budget-modal" hidden>
+    <div class="modal modal-wide">
+      <div class="modal-head">
+        <h3>🧮 显存 / 上下文预算向导</h3>
+        <button class="btn small" data-close>✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="monitor-hint" style="margin-bottom:12px">💡 估算 <b>权重(按 GPU 层数) + KV 缓存 + 计算缓冲</b> 能否装入显存，并给出<b>全速运行的最大上下文</b>。KV 每 token 字节 ≈ 层数 × KV头数 × head_dim × (K+V 字节)；也可直接填 <b>实测 KV 每 token（B/tok，f16 基准）</b>（如 gemma4-12b≈17323，随 KV 档自动缩放）。模型维度自动带出；缺失或不准可手改后即时重算。修改后点「应用到配置」写回主表单。</div>
+        <div class="cfg-grid">
+          <fieldset class="cfg-group">
+            <legend>⚙️ 输入</legend>
+            <div class="field"><label>模型权重</label><span class="num-wrap"><input type="number" id="bd-model-mb" step="16" min="1"> <span class="m-unit">MB</span></span></div>
+            <div class="field"><label>可用显存</label><span class="num-wrap"><input type="number" id="bd-free-mb" step="64" min="512"> <span class="m-unit">MB</span></span></div>
+            <div class="field"><label>上下文 ctx</label><span class="num-wrap"><input type="number" id="bd-ctx" step="256" min="512"><select class="preset" id="bd-ctx-preset" data-target="bd-ctx" title="一键填入常用上下文（按模型最大 ctx 自动生成，含超大档）"><option value="">▾ 预设</option></select></span></div>
+            <div class="field"><label>GPU 层数</label><span class="num-wrap"><input type="number" id="bd-ngl" step="1" min="-1"><select class="preset" id="bd-ngl-preset" data-target="bd-ngl" title="一键填入常用 GPU 层数"><option value="">▾ 预设</option><option value="-1">-1 全量</option><option value="0">0 纯CPU</option><option value="8">8 小显存</option><option value="16">16 中显存</option><option value="24">24</option><option value="32">32</option><option value="40">40</option></select><span class="m-unit" style="width:auto">(-1 全量)</span></span></div>
+            <div class="field"><label>KV K 类型</label><select id="bd-kvk" title="KV 缓存量化档：🟢官方 llama.cpp cache type + 🔵PolarQuant-KV 自编译扩展（与模型权重的 GGUF 量化 Q4_K_M 等不同）"><optgroup label="🟢 官方原生（llama.cpp 9 种）"><option value="f16">f16（16位·官方默认）</option><option value="f32">f32（32位·精度最高）</option><option value="bf16">bf16（16位脑浮点）</option><option value="q8_0">q8_0（8位量化）</option><option value="q4_0">q4_0（4位·大ctx推荐·PolarQuant 实测甜点）</option><option value="q4_1">q4_1（4位+偏移）</option><option value="iq4_nl">iq4_nl（4位智能）</option><option value="q5_0">q5_0（5位）</option><option value="q5_1">q5_1（5位+偏移）</option></optgroup><optgroup label="🔵 PolarQuant-KV 自编译扩展（仅自编译分支）"><option value="kvq4_0">kvq4_0（4位·独立类型·主推）</option><option value="q2_0">q2_0（2位·实验档·显存再省一半）</option></optgroup></select></div>
+            <div class="field"><label>KV V 类型</label><select id="bd-kvv" title="KV 缓存量化档：🟢官方 llama.cpp cache type + 🔵PolarQuant-KV 自编译扩展（与模型权重的 GGUF 量化 Q4_K_M 等不同）"><optgroup label="🟢 官方原生（llama.cpp 9 种）"><option value="f16">f16（16位·官方默认）</option><option value="f32">f32（32位·精度最高）</option><option value="bf16">bf16（16位脑浮点）</option><option value="q8_0">q8_0（8位量化）</option><option value="q4_0">q4_0（4位·大ctx推荐·PolarQuant 实测甜点）</option><option value="q4_1">q4_1（4位+偏移）</option><option value="iq4_nl">iq4_nl（4位智能）</option><option value="q5_0">q5_0（5位）</option><option value="q5_1">q5_1（5位+偏移）</option></optgroup><optgroup label="🔵 PolarQuant-KV 自编译扩展（仅自编译分支）"><option value="kvq4_0">kvq4_0（4位·独立类型·主推）</option><option value="q2_0">q2_0（2位·实验档·显存再省一半）</option></optgroup></select></div>
+            <div class="field"><label>KV 每token(实测)</label><span class="num-wrap"><input type="number" id="bd-petok" step="64" min="0" placeholder="如 17323 (f16基准)"> <span class="m-unit">B/tok</span></span></div>
+          </fieldset>
+          <fieldset class="cfg-group">
+            <legend>📐 模型维度 <span class="m-unit" style="font-size:11px">(自动带出，可改)</span></legend>
+            <div class="field"><label>层数</label><span class="num-wrap"><input type="number" id="bd-layers" step="1" min="1"></span></div>
+            <div class="field"><label>KV 头数</label><span class="num-wrap"><input type="number" id="bd-kvh" step="1" min="0"></span></div>
+            <div class="field"><label>head_dim</label><span class="num-wrap"><input type="number" id="bd-headdim" step="1" min="1"></span></div>
+            <div class="monitor-hint" id="bd-dim-hint" style="margin-top:6px"></div>
+          </fieldset>
+        </div>
+        <fieldset class="cfg-group" style="margin-top:12px">
+          <legend>📊 估算结果 <span class="m-unit" style="font-size:11px">(改动即重算)</span></legend>
+          <div class="vram-estimate">
+            <span id="bd-kvline">KV 每 token: -- · 当前 ctx KV: --</span>
+            <div class="vram-bar-bg"><div class="vram-bar-fill" id="bd-fill" style="width:0%"></div></div>
+            <span class="vram-text" id="bd-total">权重 -- + KV -- + 缓冲 -- = -- / 可用 --</span>
+          </div>
+          <div id="bd-verdict" style="margin-top:8px;font-size:13px;line-height:1.5"></div>
+          <div id="bd-buckets" style="margin-top:10px;display:flex;flex-wrap:wrap;gap:6px"></div>
+          <div style="margin-top:10px;display:flex;gap:14px;align-items:center;flex-wrap:wrap">
+            <label class="chk" title="多轮/重复请求复用已缓存的 prompt 前缀，省去重复预填充，显著提速"><input type="checkbox" id="bd-reuse" checked> 🔄 开启 prompt 缓存复用</label>
+            <span class="m-unit" style="font-size:11px">(写回 --cache-reuse 256 + --cache-idle-slots)</span>
+          </div>
+        </fieldset>
+      </div>
+      <div class="modal-foot">
+        <button class="btn small accent" id="bd-apply-start" title="写回 ctx / KV 档 / 缓存复用后直接启动模型">▶️ 应用并启动</button>
+        <button class="btn small" id="bd-apply" title="把 ctx / KV 类型 / 缓存复用写回主配置表单">⬇️ 应用到配置</button>
+        <button class="btn small" id="bd-reload" title="重新从当前选中的模型与表单参数同步">🔄 同步模型/表单</button>
+        <button class="btn" data-close>关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 结构化输出模板库 -->
+  <div class="modal-overlay" id="schema-modal" hidden>
+    <div class="modal modal-wide">
+      <div class="modal-head">
+        <h3>📚 结构化输出模板库</h3>
+        <button class="btn small" data-close>✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="monitor-hint" style="margin-bottom:10px">💡 选一个模板填入上方 <b>JSON Schema</b> 输入框 → 启动时 llama-server 自动转 grammar，强制输出<b>合法 JSON</b>（API 侧配 <code>response_format</code> 同效果）。schema 会按模型能力校验，也可选中后手动微调。</div>
+        <div id="schema-list" style="display:flex;flex-direction:column;gap:6px"></div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn small" id="schema-custom" title="选用后回到输入框手动编辑">✏️ 选用后手动编辑</button>
+        <button class="btn small" id="schema-clear" title="清空 JSON Schema 约束（恢复自由文本）">🗑 清空</button>
+        <button class="btn" data-close>关闭</button>
+      </div>
     </div>
   </div>
 

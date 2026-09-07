@@ -536,6 +536,16 @@
       const sel = $('sw-ctx_size') ? $('sw-ctx_size').closest('.sweep-row').querySelector('.preset') : null;
       fillCtxPreset(sel, mxc);
       applySweepGrey();
+      refreshSweepDraftCands();
+    });
+    if ($('sweep-draft-cands')) $('sweep-draft-cands').addEventListener('change', onSweepDraftCandsChange);
+    if ($('btn-sweep-spec-on')) $('btn-sweep-spec-on').addEventListener('click', function () {
+      addSweepValueByKey('spec_type', 'draft-simple');
+      showToast('已加入「启用投机」档 spec_type=draft-simple（草稿自动匹配同目录/绑定）', 'ok');
+    });
+    if ($('btn-sweep-spec-off')) $('btn-sweep-spec-off').addEventListener('click', function () {
+      addSweepValueByKey('spec_type', 'none');
+      showToast('已加入「关闭投机」档 spec_type=none', 'ok');
     });
     $('btn-hf-download').addEventListener('click', openHFModal);
     $('btn-cache').addEventListener('click', openCacheModal);
@@ -3927,6 +3937,7 @@
       o.textContent = b.name + _bd + (_sz && _sz !== '-' ? ' [' + _sz + ']' : '');
       sel.appendChild(o);
     });
+    refreshSweepDraftCands();
   }
 
   function mxcOfSweepModel() {
@@ -4272,7 +4283,8 @@
     sel.innerHTML = '<option value="">➕ 添加更多参数…</option>';
     const groups = {};
     (window.__sweepParams || []).forEach(function (pd) {
-      if (used[pd.key] || ['int', 'float', 'enum', 'bool'].indexOf(pd.kind) < 0) return;
+      if (used[pd.key]) return;
+      if (!sweepKindAllowed(pd.kind, pd.key)) return;
       const tier = window.__paramTiers && window.__paramTiers[pd.key];
       if (tier === 'system') return;
       if (q && (pd.label + ' ' + pd.key).toLowerCase().indexOf(q) < 0) return;
@@ -4327,7 +4339,7 @@
       window.__sweepParams = list;
       const groups = {};
       list.forEach(function (pd) {
-        if (['int', 'float', 'enum', 'bool'].indexOf(pd.kind) < 0) return;
+        if (!sweepKindAllowed(pd.kind, pd.key)) return;
         const tier = window.__paramTiers && window.__paramTiers[pd.key];
         if (tier === 'system') return;
         (groups[pd.group] = groups[pd.group] || []).push(pd);
@@ -4368,7 +4380,73 @@
     if (kind === 'enum') return 'enum';
     if (kind === 'bool') return 'bool';
     if (kind === 'float') return 'float';
+    if (kind === 'file' || kind === 'string') return 'string';
     return 'int';
+  }
+
+  // 扫描参数候选准入：数值/开关/枚举可扫；file 类仅放行 model_draft（草稿文件进入扫描对比）
+  function sweepKindAllowed(kind, key) {
+    if (kind === 'file') return key === 'model_draft';
+    return ['int', 'float', 'enum', 'bool'].indexOf(kind) >= 0;
+  }
+
+  // ⚡ 投机档：确保 model_draft / spec_type 参数行存在并追加一档
+  function ensureSweepRowByKey(key) {
+    if (document.getElementById('sw-' + key)) return true;
+    const pd = (window.__sweepParams || []).find(function (x) { return x.key === key; });
+    if (!pd) return false;
+    const type = sweepKindToType(pd.kind);
+    addSweepRow({
+      key: key, label: pd.label || key, type: type,
+      hint: (pd.help || '') + (key === 'model_draft' ? '（草稿留空仅跑 spec_type 时，后端自动匹配同目录/绑定草稿）' : ''),
+      def: '', ph: '逗号分隔多值（多档扫描，单值固定）',
+      presets: buildSweepChips(key, pd, type)
+    });
+    sweepAddFilter();
+    return true;
+  }
+
+  function addSweepValueByKey(key, val) {
+    if (!val) return;
+    if (!ensureSweepRowByKey(key)) return;
+    const inp = document.getElementById('sw-' + key);
+    if (!inp) return;
+    const parts = inp.value ? String(inp.value).split(',').map(function (s) { return s.trim(); }).filter(Boolean) : [];
+    if (parts.indexOf(val) < 0) parts.push(val);
+    inp.value = parts.join(',');
+    updateSweepEstimate();
+  }
+
+  // 刷新「同目录草稿」候选下拉（依据当前扫描模型）
+  function refreshSweepDraftCands() {
+    const sel = document.getElementById('sweep-draft-cands');
+    const sm = document.getElementById('sweep-model');
+    if (!sel || !sm) return;
+    const mid = sm.value;
+    if (!mid) { sel.innerHTML = '<option value="">同目录草稿…</option>'; return; }
+    api('/api/bundles/' + mid + '/match-draft', { method: 'POST', body: '{}' })
+      .then(function (r) {
+        const ms = (r && r.match) || [];
+        if (!ms.length) {
+          sel.innerHTML = '<option value="">（该模型无伴生草稿 / 无外部草稿候选）</option>';
+          return;
+        }
+        let html = '<option value="">⚡ 同目录草稿…（选它填入 model_draft 档）</option>';
+        ms.forEach(function (c) {
+          if (!c.path) return;
+          const nm = c.name || String(c.path).split(/[\\/]/).pop();
+          html += '<option value="' + esc(c.path) + '">' + esc(nm) + ' · ' + esc(c.reason || '') + '</option>';
+        });
+        sel.innerHTML = html;
+      })
+      .catch(function () { sel.innerHTML = '<option value="">（候选加载失败）</option>'; });
+  }
+
+  function onSweepDraftCandsChange() {
+    const sel = document.getElementById('sweep-draft-cands');
+    if (!sel || !sel.value) return;
+    addSweepValueByKey('model_draft', sel.value);
+    sel.value = '';
   }
 
   function buildPresetsFor(pd, type) {

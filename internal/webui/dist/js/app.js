@@ -649,7 +649,7 @@
       applyOfficialDefaults(b);
       const specEl = $('p-spec_type');
       if (specEl && window.__isMtp && !specEl.checked) specEl.checked = true;
-      if (specEl && specEl.checked) autoMatchDraft(id, false);
+      autoMatchDraft(id);
       // 把 checkbox 重新对齐到官方默认（避免 default=true 的开关被清成 false 而关闭）
       if (typeof initCheckboxDefaults === 'function') initCheckboxDefaults();
       refreshPreview();
@@ -840,7 +840,7 @@
     // ---- 新增：根据模型类型动态显示/隐藏参数组 ----
     updateParamVisibility(b);
     // ---- 结束新增 ----
-    autoMatchDraft(id, true);
+    autoMatchDraft(id);
 
     const dp = b.default_params || {};
     if (dp.ctx_size) $('p-ctx_size').value = dp.ctx_size;
@@ -1309,80 +1309,44 @@
     return { 'draft-mtp': '🧠 主模型自带 MTP 头', 'draft-simple': '📦 外部草稿模型', 'draft-dspark': '⚡ dSPARK 扩散草稿', 'draft-dflash': '⚡ dFLASH 扩散草稿', 'draft-eagle3': '⚡ EAGLE3 草稿' }[t] || '';
   }
 
-  function autoMatchDraft(modelId, applyIfChecked) {
+  // 主界面纯手动草稿（2026-09-07 用户要求去掉「自动匹配/自动填」）：
+  // 此函数只把 /match-draft 候选加载到「候选草稿」下拉并给提示，绝不自动
+  // 写入 p-model_draft、不自动选中、不自动取消投机勾选。应用草稿只经用户
+  // 手动动作：下拉选择 / 点「🔎 自动匹配」按钮 / 手填路径。
+  function autoMatchDraft(modelId) {
     if (!modelId) return;
-    const mdEl = $('p-model_draft');
     const mdHint = $('model-draft-hint');
     const candSel = $('draft-candidate-select');
-    if (!mdEl || !mdHint) return;
+    if (!mdHint && !candSel) return;
     api('/api/bundles/' + modelId + '/match-draft', { method: 'POST', body: '{}' })
       .then(function (r) {
-        const done = function () { window.__specAutoMatching = false; refreshPreview(); runAudit(); };
-        if (!r || !r.match || !r.match.length) {
-          mdHint.textContent = '⚠️ ' + (r && r.empty_reason ? r.empty_reason : '未找到适配的草稿模型：模型库/同目录中没有可投机的草稿，投机解码无法启用。');
-          if (candSel) { candSel.innerHTML = '<option value="">🪄 自动匹配草稿…</option>'; }
-          // P0-9：勾选了投机但没有可用候选（非 MTP 且无草稿）→ 自动取消勾选并提示
-          const cb = $('p-spec_type');
-          if (cb && cb.checked) {
-            cb.checked = false;
-            mdHint.textContent = '⚠️ 未找到适配草稿且非 MTP 模型，无法启用投机（已自动取消勾选）。';
-          }
-          return done();
+        const ms = (r && r.match) || [];
+        if (!ms.length) {
+          if (candSel) candSel.innerHTML = '<option value="">⚡ 候选草稿…</option>';
+          if (mdHint) mdHint.textContent = '⚠️ ' + (r && r.empty_reason ? r.empty_reason : '未找到候选草稿：模型库/同目录无可投机的草稿。需外部草稿的投机类型请手动填路径或点「🔎 自动匹配」。');
+          return;
         }
         const top = r.match[0];
-        if (candSel) {
-          const prev = candSel.value;
-          candSel.innerHTML = '<option value="">🪄 自动匹配草稿…</option>' +
-            '<option value="__none__">🚫 不使用草稿（留空）</option>';
-          r.match.forEach(function (c) {
-            const o = document.createElement('option');
-            if (c.path) {
-              o.value = c.path;
-              o.textContent = (c.name || c.path.split(/[\\/]/).pop()) + '（' + (c.reason || '') + '）';
-            } else {
-              o.value = '';
-              o.textContent = '（用主模型自带 MTP 头）';
-            }
-            candSel.appendChild(o);
-          });
-          if (prev) candSel.value = prev;
-        }
-        if (r.has_mtp || (top && !top.path)) {
-          if (!mdEl.value.trim()) mdEl.value = '';
-          mdHint.textContent = '✅ 主模型自带 MTP 头，启用投机即可（draft-mtp），无需外部草稿。';
-          return done();
-        }
-        const specOn = $('p-spec_type') ? $('p-spec_type').checked : false;
-        if (applyIfChecked && !specOn) {
-          if (mdEl.value === top.path) mdEl.value = '';
-          mdHint.textContent = '💡 未启用投机解码。勾选「🚀 启用投机解码」后将自动匹配草稿并识别格式；不需要投机可保持关闭。';
-          return done();
-        }
-        const alreadySet = mdEl.value.trim();
-        if (alreadySet) {
-          const cur = alreadySet.replace(/\\/g, '/');
-          const isRec = (top.path || '').replace(/\\/g, '/') === cur;
-          const sameDir = top.reason && top.reason.indexOf('同目录') === 0;
-          if (isRec || sameDir) {
-            mdHint.textContent = '✅ 草稿模型匹配（' + (top.reason || '') + '）。';
+        let html = '<option value="">⚡ 手动选草稿…</option>' +
+          '<option value="__none__">✖ 不使用草稿（留空）</option>';
+        r.match.forEach(function (c) {
+          if (c.path) {
+            html += '<option value="' + esc(c.path) + '">' + esc(c.name || String(c.path).split(/[\\/]/).pop()) + '（' + esc(c.reason || '') + '）</option>';
           } else {
-            mdHint.textContent = '⚠️ 当前草稿与推荐不符（推荐: ' + (top.name || top.path) + '），架构不匹配可能导致启动崩溃。建议改用自动匹配值。';
+            html += '<option value="">（用主模型自带 MTP 头）</option>';
           }
-          return done();
+        });
+        if (candSel) candSel.innerHTML = html;
+        if (mdHint) {
+          const selfMtp = !!(r.has_mtp || (top && !top.path));
+          mdHint.textContent = selfMtp
+            ? '✅ 主模型自带 MTP 头：勾选投机即可（draft-mtp），无需外部草稿。'
+            : '找到 ' + r.match.length + ' 个候选草稿：请从下方「候选草稿」下拉手动选择或手动填路径；未启用投机则无需处理。';
         }
-        if (top.path) {
-          mdEl.value = top.path;
-          if (candSel) candSel.value = top.path;
-          const dt = detectDraftType(top.path, !!window.__isMtp);
-          mdHint.textContent = '🔍 自动匹配草稿: ' + (top.reason || '') + (top.name ? ' · ' + top.name : '') + '　→ 按「' + (draftTypeLabel(dt) || dt || '') + '」投机（可手动改）';
-        } else {
-          mdEl.value = '';
-          mdHint.textContent = '✅ 主模型自带 MTP 头，启用投机即可（draft-mtp），无需外部草稿。';
-        }
-        done();
       })
       .catch(function () { /* 匹配失败不阻塞 */ });
   }
+
 
   function bindDraftMatchUI() {
     const btn = $('btn-match-draft');
@@ -1434,21 +1398,18 @@
       refreshPreview();
       runAudit();
     });
-    const mdEl = $('p-model_draft');
-    if (mdEl) mdEl.addEventListener('change', function () {
-      if (selectedId) autoMatchDraft(selectedId, false);
-    });
     const specEl = $('p-spec_type');
     if (specEl) specEl.addEventListener('change', function () {
       if (!selectedId) return;
+      const md = $('p-model_draft');
+      const hint = $('model-draft-hint');
       if (specEl.checked) {
-        window.__specAutoMatching = true;   // 等待自动匹配完成后由 done() 清除
-        autoMatchDraft(selectedId, false);
+        // 纯手动草稿：启用投机仅刷新「候选草稿」下拉供手动选择，不自动填路径/不自动选中
+        autoMatchDraft(selectedId);
+        if (hint) hint.textContent = '⚡ 已启用投机。需外部草稿的类型（draft-simple/mtp/eagle3/dflash/dspark）请从「候选草稿」下拉选择或手动填路径；留空仅适合主模型自带 MTP 头。';
       } else {
-        const md = $('p-model_draft');
         if (md) md.value = '';
-        const hint = $('model-draft-hint');
-        if (hint) hint.textContent = '💡 已关闭投机解码，草稿模型已留空。';
+        if (hint) hint.textContent = '✋ 已关闭投机解码，草稿模型已留空。';
         refreshPreview();
         runAudit();
       }

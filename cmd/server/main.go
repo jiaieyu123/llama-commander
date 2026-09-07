@@ -4745,39 +4745,40 @@ func (a *App) buildArgs(b *bundle.Bundle, params map[string]any, port int) []str
 	//   导致参数扫描/寻优这类不设投机的任务被强制带上一个错配草稿（如 dflash 浅
 	//   模型配 qwen35）→ 草稿加载崩溃。现在只有用户显式选了需要外部草稿的投机
 	//   类型（draft-mtp/simple/eagle3/dflash/dspark）时才自动补草稿。
+	// 手动草稿（2026-09-07 用户要求去掉「自动匹配/自动填」）：草稿只能由
+	// 用户显式给出（表单 model_draft / 会话参数 / 保存的测试配置）。
+	// 下方只收尾、绝不自行探测/绑定草稿：
+	//   1) 选了需外部草稿的类型（draft-*）却无草稿路径 → 显式关闭投机
+	//      （spec_type=none），避免 llama 收到 --spec-type draft-* 却无
+	//      --model-draft 而启动失败；
+	//   2) 填了草稿路径但 spec_type 为空 → 按草稿 MTP 头判 draft-mtp/simple；
+	//   3) 显式 draft-simple + 带 MTP 头草稿 → 纠正为 draft-mtp（防解码崩）。
+	specType, _ := params["spec_type"].(string)
+	userDraft, hasUserDraft := params["model_draft"].(string)
+	userDraftSet := hasUserDraft && strings.TrimSpace(userDraft) != ""
 	if !bundleIsMTP(b) {
-		specType, _ := params["spec_type"].(string)
-		userDraft, hasUserDraft := params["model_draft"].(string)
-		userDraftSet := hasUserDraft && strings.TrimSpace(userDraft) != ""
-		// 介入仅限两类：(a) 用户显式选了需要外部草稿的投机类型（draft-*）；
-		// (b) 用户没选类型但已明确填了草稿路径（想投机，只差按草稿定类型）。
-		// spec_type 为空且未填草稿 = 用户没表达投机意图 → 跟随官方默认（不投机），
-		// 不再自动 resolve 草稿（修复参数扫描/寻优被强制带错配草稿而崩溃的问题）。
-		if draftSpecNeedsExternal(specType) || (specType == "" && userDraftSet) {
-			draftPath := ""
-			if userDraftSet {
-				draftPath = strings.TrimSpace(userDraft)
+		switch {
+		case draftSpecNeedsExternal(specType) && !userDraftSet:
+			log.Printf("投机已关闭：%s 需要外部草稿模型但未提供草稿路径（不再自动匹配草稿）", specType)
+			params["spec_type"] = "none"
+			delete(params, "model_draft")
+		case specType == "" && userDraftSet:
+			userDraft = strings.TrimSpace(userDraft)
+			if bundle.HasMTPHeadByFile(userDraft) {
+				params["spec_type"] = "draft-mtp"
 			} else {
-				draftPath = a.resolveDraftModel(b)
+				params["spec_type"] = "draft-simple"
 			}
-			if draftPath != "" {
-				if specType == "" {
-					// 草稿自带类型：按 MTP 头自动识别
-					if bundle.HasMTPHeadByFile(draftPath) {
-						params["spec_type"] = "draft-mtp"
-					} else {
-						params["spec_type"] = "draft-simple"
-					}
-				} else if specType == "draft-simple" && bundle.HasMTPHeadByFile(draftPath) {
-					// MTP 草稿必须 draft-mtp，纠正用户/前端的 draft-simple
-					params["spec_type"] = "draft-mtp"
-				}
-				params["model_draft"] = draftPath
+			params["model_draft"] = userDraft
+		case specType == "draft-simple" && userDraftSet:
+			if bundle.HasMTPHeadByFile(strings.TrimSpace(userDraft)) {
+				params["spec_type"] = "draft-mtp"
 			}
 		}
 	}
-	// 回填草稿参数
-	if b.DraftModel.Enabled && len(b.DraftModel.SpecParams) > 0 {
+	// 回填草稿微调参数：仅当本次草稿由用户显式给出时才应用（避免凭 bundle
+	// 自动绑定/探测的草稿偷偷注入其参数）
+	if userDraftSet && b.DraftModel.Enabled && len(b.DraftModel.SpecParams) > 0 {
 		keyMap := map[string]string{
 			"n_max":   "spec_draft_n_max",
 			"n_min":   "spec_draft_n_min",
@@ -4789,8 +4790,6 @@ func (a *App) buildArgs(b *bundle.Bundle, params map[string]any, port int) []str
 			if !ok {
 				continue
 			}
-			// P1-10：用户清空某字段（意图用官方默认）也应触发回填；
-			// 原判断 !exists 会把“空串=用户想用官方默认 3”误当成已设置。
 			if cur, exists := params[regKey]; !exists || cur == nil || cur == "" {
 				params[regKey] = v
 			}

@@ -539,13 +539,9 @@
       refreshSweepDraftCands();
     });
     if ($('sweep-draft-cands')) $('sweep-draft-cands').addEventListener('change', onSweepDraftCandsChange);
-    if ($('btn-sweep-spec-on')) $('btn-sweep-spec-on').addEventListener('click', function () {
-      addSweepValueByKey('spec_type', 'draft-simple');
-      showToast('已加入「启用投机」档 spec_type=draft-simple（草稿自动匹配同目录/绑定）', 'ok');
-    });
     if ($('btn-sweep-spec-off')) $('btn-sweep-spec-off').addEventListener('click', function () {
       addSweepValueByKey('spec_type', 'none');
-      showToast('已加入「关闭投机」档 spec_type=none', 'ok');
+      showToast('已加入「关闭投机」档 spec_type=none（要启用投机请从上方手动选草稿）', 'ok');
     });
     $('btn-hf-download').addEventListener('click', openHFModal);
     $('btn-cache').addEventListener('click', openCacheModal);
@@ -4398,7 +4394,7 @@
     const type = sweepKindToType(pd.kind);
     addSweepRow({
       key: key, label: pd.label || key, type: type,
-      hint: (pd.help || '') + (key === 'model_draft' ? '（草稿留空仅跑 spec_type 时，后端自动匹配同目录/绑定草稿）' : ''),
+      hint: (pd.help || '') + (key === 'model_draft' ? '（手动填入草稿路径即启用投机，后端按草稿 MTP 头自动判 draft-mtp/simple；逗号可填多个草稿逐个对比）' : ''),
       def: '', ph: '逗号分隔多值（多档扫描，单值固定）',
       presets: buildSweepChips(key, pd, type)
     });
@@ -4447,6 +4443,7 @@
     if (!sel || !sel.value) return;
     addSweepValueByKey('model_draft', sel.value);
     sel.value = '';
+    showToast('已加入草稿档（此草稿启用投机；后端按其 MTP 头判 draft-mtp/simple）', 'ok');
   }
 
   function buildPresetsFor(pd, type) {

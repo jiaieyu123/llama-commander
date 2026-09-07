@@ -965,11 +965,10 @@
                   <button class="btn tiny" id="btn-sweep-fillall" hidden title="给所有参数填入常用档位">🪄 全参数</button>
                   <button class="btn tiny" id="btn-sweep-clear" title="清空所有扫描参数">🧹 清空</button>
                 </div>
-                <div class="sweep-tools" style="border-top:1px dashed rgba(128,128,128,.35);margin:6px 0 2px;padding-top:6px" title="投机扫描档：草稿留空 = 后端自动匹配同目录/绑定草稿；逗号分隔多档">
+                <div class="sweep-tools" style="border-top:1px dashed rgba(128,128,128,.35);margin:6px 0 2px;padding-top:6px" title="投机扫描档（手动）：从下拉挑草稿 → 加入 model_draft 档即启用投机（后端按草稿 MTP 头判 draft-mtp/simple）；✖ 关 加入 spec_type=none 档">
                   <span class="sm-label">⚡ 投机</span>
-                  <select id="sweep-draft-cands" style="max-width:250px;flex:1" title="选当前模型同目录草稿 → 填入 model_draft 档（多选逐个追加）"><option value="">同目录草稿…</option></select>
-                  <button class="btn tiny" id="btn-sweep-spec-on" type="button" title="加入「启用投机」档 spec_type=draft-simple（后端自动匹配草稿并按 MTP 头纠正类型）">⚡ 启用</button>
-                  <button class="btn tiny" id="btn-sweep-spec-off" type="button" title="加入「关闭投机」档 spec_type=none">✖ 关</button>
+                  <select id="sweep-draft-cands" style="max-width:260px;flex:1" title="手动挑当前模型的同目录草稿 → 填入 model_draft 档（逐个选可对比多个草稿）"><option value="">手动选草稿…</option></select>
+                  <button class="btn tiny" id="btn-sweep-spec-off" type="button" title="加入「关闭投机」档 spec_type=none（想对比开/关：先选草稿启用，再加此 none 档）">✖ 关</button>
                 </div>
                 <div class="tp-scroll"><div id="sweep-params"></div></div>
                 <div id="sweep-help-dock" class="param-help-dock" hidden>

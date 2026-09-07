@@ -776,6 +776,11 @@ var paramGuidance = map[string]ParamGuidance{
 		Recommendation: "0（跟随模型）",
 		Related:        []string{"rope_scaling"},
 	},
+	"rope_freq_scale": {
+		Description:    "RoPE 频率缩放因子（--rope-freq-scale）：将上下文扩展 1/N 倍。配合 --rope-scaling linear 使用，如 N=2 使 8k 模型跑 16k。",
+		Recommendation: "0（关闭）；线性扩长时填 N（1/N 扩展）",
+		Related:        []string{"rope_scaling", "rope_freq_base"},
+	},
 	"yarn_orig_ctx": {
 		Description:    "YaRN 原始上下文长度（模型训练时的上下文，如 4096）。扩长上下文时填写。",
 		Recommendation: "模型原生上下文（如 4096）",
@@ -945,6 +950,11 @@ var paramGuidance = map[string]ParamGuidance{
 		Description:    "全量日志（-v）：输出所有消息（等价于 log-verbosity=无穷）。调试时开启。",
 		Recommendation: "off（默认）",
 		Related:        []string{"log_verbosity"},
+	},
+	"log_jsonl": {
+		Description:    "JSONL 日志（--log-jsonl）：以一行一个 JSON 对象输出结构化日志到 stdout，便于程序解析；同时禁用彩色日志。",
+		Recommendation: "默认关闭；需要程序化解析日志时开启",
+		Related:        []string{"log_verbose", "log_file"},
 	},
 	// ── 提示缓存 ─────────────────────────────
 	"no_cache_prompt": {
@@ -1186,12 +1196,7 @@ var paramGuidance = map[string]ParamGuidance{
 		Recommendation: "默认关闭",
 		Related:        []string{"mcp_servers_json"},
 	},
-	// ── 分布式 / 模板 ───────────────────────
-	"rpc": {
-		Description:    "指定远端 RPC 计算设备（--rpc），格式如 `host:port`。把部分张量/层分发到远端 GPU 服务器计算，扩展显存，适合多机分布式推理。",
-		Recommendation: "单机留空；多机填远端地址",
-		Related:        []string{"n_gpu_layers"},
-	},
+	// ── 模板与推理 ───────────────────────────
 	"no_jinja": {
 		Description:    "禁用 Jinja 模板引擎（--no-jinja），改用简单聊天模板。若模型自带的 Jinja 模板兼容性有问题，可勾选回退到基础格式。",
 		Recommendation: "模型模板异常时可勾选",

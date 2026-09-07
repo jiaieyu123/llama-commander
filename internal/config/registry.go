@@ -198,6 +198,7 @@ var paramMatrix = []ParamDef{
 	{Key: "cont_batching", LongFlag: "--cont-batching", Kind: KindBool, Group: GroupPerf, Label: "连续批处理", Default: true, NegFlag: "--no-cont-batching", Tier: TierExpert},
 	{Key: "slot_prompt_similarity", LongFlag: "--slot-prompt-similarity", Kind: KindFloat, Group: GroupPerf, Label: "槽位复用相似度", Default: 0.10, Min: 0, Max: 1, RequiresValue: true, Tier: TierExpert},
 	{Key: "rope_freq_base", LongFlag: "--rope-freq-base", Kind: KindFloat, Group: GroupPerf, Label: "RoPE 基础频率", Default: 0.0, Min: 0, RequiresValue: true, Tier: TierExpert},
+	{Key: "rope_freq_scale", LongFlag: "--rope-freq-scale", Kind: KindFloat, Group: GroupPerf, Label: "RoPE 频率缩放", Default: 0.0, Min: 0, RequiresValue: true, Tier: TierExpert},
 	{Key: "yarn_orig_ctx", LongFlag: "--yarn-orig-ctx", Kind: KindInt, Group: GroupPerf, Label: "YaRN 原始上下文", Default: 0, Min: 0, RequiresValue: true, Tier: TierExpert},
 	{Key: "yarn_ext_factor", LongFlag: "--yarn-ext-factor", Kind: KindFloat, Group: GroupPerf, Label: "YaRN 外推因子", Default: -1.0, RequiresValue: true, Tier: TierExpert},
 	{Key: "yarn_attn_factor", LongFlag: "--yarn-attn-factor", Kind: KindFloat, Group: GroupPerf, Label: "YaRN 注意力因子", Default: -1.0, RequiresValue: true, Tier: TierExpert},
@@ -381,7 +382,6 @@ var paramMatrix = []ParamDef{
 	{Key: "mcp_servers_config", LongFlag: "--mcp-servers-config", Kind: KindString, Group: GroupNetwork, Label: "MCP 配置 JSON 文件", Default: "", RequiresValue: true, Tier: TierExpert},
 	{Key: "mcp_servers_json", LongFlag: "--mcp-servers-json", Kind: KindString, Group: GroupNetwork, Label: "MCP 内联 JSON", Default: "", RequiresValue: true, Tier: TierExpert},
 	{Key: "ui_mcp_proxy", LongFlag: "--ui-mcp-proxy", Kind: KindBool, Group: GroupNetwork, Label: "MCP CORS 代理", Default: false, Tier: TierExpert},
-	{Key: "rpc", LongFlag: "--rpc", Kind: KindString, Group: GroupNetwork, Label: "RPC 设备列表", Default: "", RequiresValue: true, Tier: TierExpert},
 
 	// ── 🧩 模板与推理 ───────────────────────────────────────────
 	{Key: "jinja", LongFlag: "--jinja", Kind: KindBool, Group: GroupChat, Label: "启用 Jinja 引擎", Default: true, NegFlag: "--no-jinja", Tier: TierExpert},
@@ -402,6 +402,7 @@ var paramMatrix = []ParamDef{
 	{Key: "log_colors", LongFlag: "--log-colors", Kind: KindEnum, Group: GroupLog, Label: "彩色日志", Default: "auto", Enum: []string{"", "auto", "on", "off"}, RequiresValue: true, Tier: TierSystem},
 	{Key: "log_verbosity", LongFlag: "--log-verbosity", Kind: KindInt, Group: GroupLog, Label: "日志详细度", Default: 3, Min: 0, Max: 5, RequiresValue: true, Tier: TierSystem},
 	{Key: "log_verbose", LongFlag: "--log-verbose", Flag: "-v", Kind: KindBool, Group: GroupLog, Label: "全量日志(无穷级)", Default: false, Tier: TierSystem},
+	{Key: "log_jsonl", LongFlag: "--log-jsonl", Kind: KindBool, Group: GroupLog, Label: "JSONL 日志", Default: false, Tier: TierSystem},
 	{Key: "log_prefix", LongFlag: "--log-prefix", Kind: KindBool, Group: GroupLog, Label: "日志前缀", Default: false, Tier: TierSystem},
 	{Key: "log_timestamps", LongFlag: "--log-timestamps", Kind: KindBool, Group: GroupLog, Label: "日志时间戳", Default: false, Tier: TierSystem},
 	{Key: "log_disable", LongFlag: "--log-disable", Kind: KindBool, Group: GroupLog, Label: "禁用日志", Default: false, Tier: TierSystem},

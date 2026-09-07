@@ -554,3 +554,87 @@ func newID(prefix string) string {
 	}
 	return fmt.Sprintf("%s_%08x", prefix, b)
 }
+
+// Rescan reconciles the local bundle store with the filesystem:
+//   - bundles whose base GGUF file disappeared (folder deleted / moved) are removed;
+//   - new .gguf files that appear in the directories of surviving local bundles
+//     (new downloads / fresh conversions) are added.
+//
+// It parses new models and persists once at the end. New files intentionally skip
+// SHA-256 hashing (hashing would read every new GB-scale file on every boot).
+// Returns the names of removed and added models.
+func (m *Manager) Rescan() (removed, added []string, err error) {
+	dirs := map[string]bool{}
+	m.mu.Lock()
+	for id, b := range m.bundles {
+		if b.SourceType != SourceLocal || b.BaseModel.Path == "" {
+			continue
+		}
+		// Self-heal: companion files (mmproj / draft / lora) that were somehow
+		// registered as standalone models are dropped, matching ScanDir rules.
+		if classifyCompanion(filepath.Base(b.BaseModel.Path)) != "" {
+			delete(m.bundles, id)
+			removed = append(removed, b.Name+"（伴生文件，非独立模型）")
+			continue
+		}
+		if _, serr := os.Stat(b.BaseModel.Path); serr != nil {
+			delete(m.bundles, id)
+			removed = append(removed, b.Name)
+		} else {
+			dirs[filepath.Dir(b.BaseModel.Path)] = true
+		}
+	}
+	m.mu.Unlock()
+
+	// Parse new models outside the lock (GGUF header I/O can be slow).
+	var fresh []*Bundle
+	for d := range dirs {
+		entries, derr := os.ReadDir(d)
+		if derr != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(strings.ToLower(e.Name()), ".gguf") {
+				continue
+			}
+			// Only standalone models are added; companions (mmproj / draft /
+			// lora) are excluded exactly like the folder scanner (ScanDir).
+			if classifyCompanion(e.Name()) != "" {
+				continue
+			}
+			p := filepath.Join(d, e.Name())
+			if fi, serr := os.Stat(p); serr != nil || fi.Size() == 0 {
+				continue
+			}
+			if _, ok := m.FindByPath(p); ok {
+				continue
+			}
+			nb, nerr := NewFromGGUF(p, "", CompanionHints{})
+			if nerr != nil {
+				continue
+			}
+			fresh = append(fresh, nb)
+		}
+	}
+
+	if len(fresh) > 0 {
+		m.mu.Lock()
+		for _, nb := range fresh {
+			if nb.ID == "" {
+				nb.ID = newID("bundle")
+			}
+			now := time.Now().UTC().Format(time.RFC3339)
+			if nb.CreatedAt == "" {
+				nb.CreatedAt = now
+			}
+			nb.UpdatedAt = now
+			m.bundles[nb.ID] = nb
+			added = append(added, nb.Name)
+		}
+		m.mu.Unlock()
+	}
+	if len(removed) > 0 || len(fresh) > 0 {
+		return removed, added, m.Save()
+	}
+	return removed, added, nil
+}

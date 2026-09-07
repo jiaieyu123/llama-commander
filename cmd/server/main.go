@@ -614,6 +614,37 @@ func (a *App) handleBundles(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleBundleRescan reconciles the model store with the filesystem
+// (POST /api/bundles/rescan): removes local bundles whose GGUF file disappeared
+// and adds new .gguf files found beside surviving local models. Returns the
+// removed / added model names so the UI can refresh every model dropdown.
+func (a *App) handleBundleRescan(w http.ResponseWriter, r *http.Request) {
+	removed, added, err := a.bundles.Rescan()
+	if err != nil {
+		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	for _, n := range removed {
+		log.Printf("模型库重扫：已移除（文件不存在）%s", n)
+	}
+	for _, n := range added {
+		log.Printf("模型库重扫：新发现模型 %s", n)
+	}
+	a.writeJSON(w, http.StatusOK, map[string]any{"removed": removed, "added": added, "total": len(a.bundles.List())})
+}
+
+// rescanBundles runs the disk reconciliation once at boot (non-fatal).
+func (a *App) rescanBundles() {
+	removed, added, err := a.bundles.Rescan()
+	if err != nil {
+		log.Printf("模型库重扫失败: %v", err)
+		return
+	}
+	if len(removed) > 0 || len(added) > 0 {
+		log.Printf("模型库重扫完成：移除 %d（%v），新增 %d（%v）", len(removed), removed, len(added), added)
+	}
+}
+
 // handleBundleItem supports PUT/DELETE on /api/bundles/{id}.
 func (a *App) handleBundleItem(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
@@ -4708,13 +4739,24 @@ func (a *App) buildArgs(b *bundle.Bundle, params map[string]any, port int) []str
 	//   1) 用户/前端只填草稿路径（spec_type 留空=自动）→ 按草稿 MTP 头自动定类型；
 	//   2) 用户显式选 draft-* 但没填草稿 → 自动从 bundle/同目录补草稿路径；
 	//   3) 用户填了 MTP 草稿却把类型配成 draft-simple → 自动纠正为 draft-mtp。
-	// 显式 spec_type=none（关闭投机）或主模型自带 MTP（bundleIsMTP）时不介入。
+	// 显式 spec_type=none（关闭投机）、spec_type 为空（用户没表达投机意图，跟随
+	// 官方默认 = 不投机）、或主模型自带 MTP（bundleIsMTP）时不介入。
+	//   P0-fix(2026-09-07): 此前 spec_type=="" 也会自动 resolve 草稿并注入投机，
+	//   导致参数扫描/寻优这类不设投机的任务被强制带上一个错配草稿（如 dflash 浅
+	//   模型配 qwen35）→ 草稿加载崩溃。现在只有用户显式选了需要外部草稿的投机
+	//   类型（draft-mtp/simple/eagle3/dflash/dspark）时才自动补草稿。
 	if !bundleIsMTP(b) {
 		specType, _ := params["spec_type"].(string)
-		if specType == "" || draftSpecNeedsExternal(specType) {
+		userDraft, hasUserDraft := params["model_draft"].(string)
+		userDraftSet := hasUserDraft && strings.TrimSpace(userDraft) != ""
+		// 介入仅限两类：(a) 用户显式选了需要外部草稿的投机类型（draft-*）；
+		// (b) 用户没选类型但已明确填了草稿路径（想投机，只差按草稿定类型）。
+		// spec_type 为空且未填草稿 = 用户没表达投机意图 → 跟随官方默认（不投机），
+		// 不再自动 resolve 草稿（修复参数扫描/寻优被强制带错配草稿而崩溃的问题）。
+		if draftSpecNeedsExternal(specType) || (specType == "" && userDraftSet) {
 			draftPath := ""
-			if dp, ok := params["model_draft"].(string); ok && strings.TrimSpace(dp) != "" {
-				draftPath = strings.TrimSpace(dp)
+			if userDraftSet {
+				draftPath = strings.TrimSpace(userDraft)
 			} else {
 				draftPath = a.resolveDraftModel(b)
 			}
@@ -4795,6 +4837,7 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("GET /api/monitor", a.handleMonitor)
 	mux.HandleFunc("GET /api/params", a.handleParams)
 	mux.HandleFunc("/api/bundles", a.handleBundles)
+	mux.HandleFunc("POST /api/bundles/rescan", a.handleBundleRescan)
 	mux.HandleFunc("/api/bundles/{id}", a.handleBundleItem)
 	mux.HandleFunc("POST /api/bundles/{id}/configs", a.handleBundleConfigs)
 	mux.HandleFunc("DELETE /api/bundles/{id}/configs/{cfgId}", a.handleBundleConfigItem)
@@ -4904,6 +4947,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("初始化失败: %v", err)
 	}
+
+	// Boot-time model-store reconciliation: drop local bundles whose files were
+	// deleted from disk and pick up new .gguf files (non-blocking).
+	go app.rescanBundles()
 
 	addr := fmt.Sprintf("%s:%d", *host, *port)
 	srv := &http.Server{Addr: addr, Handler: app.routes()}

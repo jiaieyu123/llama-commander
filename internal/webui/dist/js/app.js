@@ -301,7 +301,12 @@
     setInterval(refreshStatus, 5000);
     setInterval(updateUptimes, 1000);
 
-    $('btn-refresh-models').addEventListener('click', refreshBundles);
+    $('btn-refresh-models').addEventListener('click', function () {
+      // 先重扫磁盘（剔除已删文件夹 / 发现新增 .gguf），再刷新所有模型下拉与列表。
+      api('/api/bundles/rescan', { method: 'POST', body: '{}' })
+        .then(refreshBundles)
+        .catch(function () { refreshBundles(); });
+    });
     $('model-select').addEventListener('change', onModelChange);
     $('test-config-select').addEventListener('change', function () { if (selectedId && this.value) applySelectedConfig(); });
     $('btn-apply-config').addEventListener('click', function () { if ($('test-config-select').value) applySelectedConfig(); });
@@ -689,12 +694,16 @@
         opt.value = b.id;
         const m = (b.base_model && b.base_model.metadata) || {};
         const badge = m.file_type_name ? ' (' + m.file_type_name + ')' : '';
-        opt.textContent = b.name + badge;
+        const sz = fmtMB((b.base_model || {}).file_size_mb);
+        opt.textContent = b.name + badge + (sz && sz !== '-' ? ' [' + sz + ']' : '');
         sel.appendChild(opt);
       });
       if (prev && list.some(b => b.id === prev)) { sel.value = prev; }
       $('foot-models').textContent = list.length;
       renderLibrary(list);
+      // 测试弹窗若已打开，同步其模型下拉与多选列表（与配置页下拉保持一致）。
+      const _tm = document.getElementById('test-modal');
+      if (_tm && !_tm.hidden) { renderTestModelList(); renderSweepModel(); }
       onModelChange();
     }).catch(function (e) { console.error(e); });
   }
@@ -3739,7 +3748,8 @@
     bundles.forEach(function (b) {
       const div = document.createElement('div');
       div.className = 'test-model-row';
-      div.innerHTML = `<input type="checkbox" class="tm" data-id="${esc(b.id)}" checked><span title="${esc(b.base_model && b.base_model.path || '')}">${esc(b.name)}</span>`;
+      const _sz = fmtMB((b.base_model || {}).file_size_mb);
+      div.innerHTML = `<input type="checkbox" class="tm" data-id="${esc(b.id)}" checked><span title="${esc(b.base_model && b.base_model.path || '')}">${esc(b.name)}${_sz && _sz !== '-' ? ' <small style="color:var(--muted)">[' + _sz + ']</small>' : ''}</span>`;
       box.appendChild(div);
     });
     updateTestModelCount();
@@ -3911,7 +3921,10 @@
     bundles.forEach(function (b) {
       const o = document.createElement('option');
       o.value = b.id;
-      o.textContent = b.name + (b.base_model && b.base_model.path ? '（' + b.base_model.path + '）' : '');
+      const _m = (b.base_model || {}).metadata || {};
+      const _bd = _m.file_type_name ? ' (' + _m.file_type_name + ')' : '';
+      const _sz = fmtMB((b.base_model || {}).file_size_mb);
+      o.textContent = b.name + _bd + (_sz && _sz !== '-' ? ' [' + _sz + ']' : '');
       sel.appendChild(o);
     });
   }
